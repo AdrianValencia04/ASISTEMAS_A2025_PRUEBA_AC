@@ -1,8 +1,8 @@
 # app.py
 # ======================================================
 # Suite de Auditoría Asistida por Computadora (CAAT 1–5)
-# Formato: una sola página con secciones interactivas.
-# Dependencias: streamlit, pandas, numpy (sin matplotlib)
+# Una sola página con secciones interactivas.
+# Formato de entrada recomendado: CSV (sin dependencias extra).
 # ======================================================
 
 import streamlit as st
@@ -15,16 +15,23 @@ st.set_page_config(page_title="Suite de Auditoría Asistida por Computadora (CAA
 # ================= Utilidades robustas =================
 
 def read_any(file):
+    """
+    Lector seguro de archivos. Soporta CSV nativamente.
+    Si suben XLSX/XLS, muestra un mensaje para convertir a CSV (evitamos openpyxl/xlrd).
+    """
     if file is None:
         return None
     name = file.name.lower()
     try:
         if name.endswith(".csv"):
+            # infiere separador y codificación
             return pd.read_csv(file, encoding="utf-8", sep=None, engine="python")
         elif name.endswith(".xlsx") or name.endswith(".xls"):
-            return pd.read_excel(file)
+            st.error("Este entorno está configurado para usar **CSV**. "
+                     "Por favor conviértelo a CSV desde Excel (Guardar como → CSV) y vuelve a subirlo.")
+            return None
         else:
-            st.error("Formato no soportado. Sube CSV o XLSX.")
+            st.error("Formato no soportado. Sube CSV.")
             return None
     except Exception as e:
         st.error(f"Error al leer el archivo: {e}")
@@ -50,7 +57,7 @@ def normalize_cols(df):
     return df
 
 def smart_datetime_cast(series):
-    """Casteo seguro de fecha/hora cuando 'series' SÍ es una Serie."""
+    """Conversión segura a datetime cuando 'series' SÍ es una Serie."""
     try:
         return pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
     except Exception:
@@ -59,7 +66,7 @@ def smart_datetime_cast(series):
 def ensure_datetime_series(col):
     """
     Acepta Serie o DataFrame:
-    - Si es DataFrame con columnas tipo year/month/day(/hour/minute/second), arma la fecha.
+    - Si es DataFrame con columnas year/month/day(/hour/minute/second), arma la fecha.
     - Si no, toma la primera subcolumna y castea.
     """
     if isinstance(col, pd.DataFrame):
@@ -85,7 +92,6 @@ def ensure_datetime_series(col):
             return pd.to_datetime(parts, errors="coerce")
         # fallback: primera subcolumna
         col = col.iloc[:, 0]
-
     return smart_datetime_cast(col)
 
 def risk_label(score):
@@ -119,12 +125,32 @@ def explain_findings(df, empty_msg="Sin observaciones."):
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Descargar hallazgos (CSV)", data=csv, file_name="hallazgos.csv")
 
+# -------- Modo guía (ayudas en la UI) --------
 st.title("🔍 Suite de Auditoría Asistida por Computadora (CAAT 1–5)")
-st.caption("Sube tus bases (CSV/XLSX), ajusta parámetros y analiza en vivo.")
+st.caption("Sube tus bases (CSV), ajusta parámetros y analiza en vivo.")
+show_tips = st.checkbox("🛈 Mostrar ayudas en pantalla", value=True)
 
 # ========================== CAAT 1 ==========================
 st.header("🕒 CAAT 1 – Validación de registros fuera de horario")
-f1 = st.file_uploader("Log de actividades (CSV/XLSX)", type=["csv","xlsx"], key="c1_file")
+
+with st.expander("¿Cómo usar CAAT 1?", expanded=show_tips):
+    st.markdown("""
+**Objetivo:** detectar eventos fuera del horario laboral que definas.
+
+**Pasos:**
+1) **Columna Usuario** → quién ejecuta (ej.: `Usuario`, `user`).
+2) **Columna Fecha/Hora** → momento del evento (ej.: `Timestamp`, `Fecha_Registro`).  
+   *Si no es fecha válida, la app te avisará.*
+3) *(Opcional)* **Acción** → severidad/acción (ej.: `Severidad`, `Accion`).
+4) Ajusta horario y marca **Solo días hábiles** si aplica.
+5) Revisa métricas, hallazgos y descarga el CSV.
+""")
+
+f1 = st.file_uploader(
+    "Log de actividades (CSV)",
+    type=["csv"], key="c1_file",
+    help=("Sube CSV con al menos Usuario y Fecha/Hora." if show_tips else None)
+)
 df1 = read_any(f1)
 
 if df1 is not None:
@@ -133,28 +159,41 @@ if df1 is not None:
     cols1 = df1.columns.tolist()
 
     c1a, c1b, c1c = st.columns(3)
-    c1_user = c1a.selectbox("Columna Usuario", cols1)
-    c1_dt   = c1b.selectbox("Columna Fecha/Hora", cols1)
-    c1_act  = c1c.selectbox("Columna Acción (opcional)", ["(ninguna)"]+cols1)
+    c1_user = c1a.selectbox("Columna Usuario", cols1,
+                            help=("Identificador de quien ejecuta la acción." if show_tips else None))
+    c1_dt   = c1b.selectbox("Columna Fecha/Hora", cols1,
+                            help=("Fecha y hora del evento." if show_tips else None))
+    c1_act  = c1c.selectbox("Columna Acción (opcional)", ["(ninguna)"]+cols1,
+                            help=("Tipo de evento/severidad si existe." if show_tips else None))
 
     p1a, p1b, p1c, p1d = st.columns(4)
-    start_h = p1a.time_input("Inicio jornada", value=time(8,0))
-    end_h   = p1b.time_input("Fin jornada", value=time(18,0))
-    weekdays_only = p1c.checkbox("Solo días hábiles (L–V)", True)
-    rango = p1d.slider("Top N reincidentes", 5, 50, 10, help="Muestra top N usuarios con más eventos fuera de horario")
+    start_h = p1a.time_input("Inicio jornada", value=time(8,0),
+                             help=("Hora de inicio laboral." if show_tips else None))
+    end_h   = p1b.time_input("Fin jornada", value=time(18,0),
+                             help=("Hora de fin laboral." if show_tips else None))
+    weekdays_only = p1c.checkbox("Solo días hábiles (L–V)", True,
+                                 help=("Ignora sábado y domingo." if show_tips else None))
+    rango = p1d.slider("Top N reincidentes", 5, 50, 10,
+                       help=("Usuarios con más eventos fuera de horario." if show_tips else None))
 
     work = df1[[c1_user, c1_dt] + ([] if c1_act=="(ninguna)" else [c1_act])].copy()
     work.rename(columns={c1_user:"user", c1_dt:"dt", c1_act:"action" if c1_act!="(ninguna)" else c1_act}, inplace=True)
     work["dt"] = ensure_datetime_series(work["dt"])
+
+    nat_ratio = work["dt"].isna().mean()
+    if nat_ratio > 0.3:
+        st.warning(f"⚠️ La columna de **Fecha/Hora** parece no ser válida (~{nat_ratio:.0%} NaT). "
+                   "Prueba con otra columna que contenga fecha y hora reales.")
+
     work["weekday"] = work["dt"].dt.weekday
 
-    # Comparación en minutos desde medianoche (evita TypeError)
+    # Comparación en minutos desde medianoche
     work["dt_mins"] = (work["dt"].dt.hour.fillna(-1)*60 + work["dt"].dt.minute.fillna(0)).astype(int)
     start_m = start_h.hour*60 + start_h.minute
     end_m   = end_h.hour*60 + end_h.minute
     if end_m >= start_m:
         in_schedule = (work["dt_mins"] >= start_m) & (work["dt_mins"] <= end_m)
-    else:
+    else:  # turno nocturno
         in_schedule = (work["dt_mins"] >= start_m) | (work["dt_mins"] <= end_m)
 
     if weekdays_only:
@@ -162,6 +201,15 @@ if df1 is not None:
 
     work["fuera_horario"] = ~in_schedule
     out = work[work["fuera_horario"]].copy().sort_values("dt")
+
+    # Salida legible (fecha/hora)
+    out_report = out.copy()
+    out_report["fecha"] = out_report["dt"].dt.strftime("%Y-%m-%d").fillna("")
+    out_report["hora"]  = out_report["dt"].dt.strftime("%H:%M:%S").fillna("")
+    cols_export = ["user","fecha","hora"]
+    if "action" in out_report.columns: cols_export += ["action"]
+    cols_export += ["weekday","fuera_horario"]
+    out_report = out_report[[c for c in cols_export if c in out_report.columns]]
 
     total = len(work)
     fuera = len(out)
@@ -172,23 +220,30 @@ if df1 is not None:
     m1.metric("Eventos totales", total)
     m2.metric("Fuera de horario", fuera)
     m3.metric("% fuera de horario", f"{pct:.2f}%")
+    if show_tips:
+        st.caption("• El % se calcula sobre eventos convertidos correctamente a fecha/hora.")
+
     show_score(sc, "Riesgo agregado CAAT 1")
 
     st.subheader("Hallazgos")
-    explain_findings(out, "No se detectaron eventos fuera de horario con los parámetros configurados.")
+    if out_report.empty:
+        st.success("No se detectaron eventos fuera de horario con los parámetros configurados.")
+    else:
+        st.dataframe(out_report, use_container_width=True, hide_index=True)
+        csv = out_report.to_csv(index=False).encode("utf-8")
+        st.download_button("Descargar hallazgos (CSV)", data=csv, file_name="hallazgos_caat1.csv",
+                           help=("Exporta usuario, fecha y hora legibles." if show_tips else None))
 
-    if not out.empty:
         st.subheader("Usuarios reincidentes (Top N)")
         top = out.groupby("user").size().reset_index(name="eventos_fuera").sort_values("eventos_fuera", ascending=False).head(rango)
         st.dataframe(top, use_container_width=True, hide_index=True)
 
     methodology_box("""
-**Objetivo:** Identificar actividades fuera del horario laboral/turno.  
-**Procedimiento:** Conversión a minutos desde medianoche; filtro por días hábiles; listado de eventos fuera de horario y reincidencia por usuario.  
-**Riesgo:** Operaciones no autorizadas, uso indebido de credenciales.
+**Qué hace esta prueba:**  
+Convierte la hora del evento a **minutos desde medianoche** y contrasta con el rango que definas (y días hábiles).
 """)
     recommendations_box([
-        "Validar permisos especiales/turnos con RRHH.",
+        "Validar excepciones de horario con RRHH o jefaturas.",
         "Configurar alertas automáticas por accesos fuera de horario.",
         "Aplicar MFA y cierre automático de sesiones inactivas."
     ])
@@ -197,7 +252,19 @@ st.divider()
 
 # ========================== CAAT 2 ==========================
 st.header("🛡️ CAAT 2 – Auditoría de privilegios (roles críticos y SoD)")
-f2 = st.file_uploader("Usuarios/Roles (CSV/XLSX)", type=["csv","xlsx"], key="c2_file")
+
+with st.expander("¿Cómo usar CAAT 2?", expanded=show_tips):
+    st.markdown("""
+**Objetivo:** identificar excesos de privilegios y conflictos de Segregación de Funciones (SoD).
+
+**Pasos:**
+1) **Usuario** y **Rol/Perfil** (elige las columnas correctas).
+2) Marca **roles críticos** (por columna o listado).
+3) Define **reglas SoD** (una por línea: `A -> B`).
+4) Revisa usuarios críticos y violaciones SoD; descarga hallazgos.
+""")
+
+f2 = st.file_uploader("Usuarios/Roles (CSV)", type=["csv"], key="c2_file")
 df2 = read_any(f2)
 
 if df2 is not None:
@@ -210,7 +277,8 @@ if df2 is not None:
     c2_role = c2b.selectbox("Columna Rol/Perfil", cols2)
     c2_crit = c2c.selectbox("Columna indicador 'crítico' (opcional)", ["(ninguna)"]+cols2)
 
-    roles_crit_txt = st.text_area("Roles críticos (si no tienes columna, sepáralos por coma)", value="ADMIN, APROBADOR_PAGOS, TESORERIA, SUPERUSER")
+    roles_crit_txt = st.text_area("Roles críticos (si no tienes columna, sepáralos por coma)",
+                                  value="ADMIN, APROBADOR_PAGOS, TESORERIA, SUPERUSER")
     crit_list = [r.strip().lower() for r in roles_crit_txt.split(",")] if roles_crit_txt else []
 
     st.caption("Reglas de Segregación de Funciones (SoD). Una por línea, formato 'A -> B'")
@@ -224,6 +292,7 @@ if df2 is not None:
     base = df2[[c2_user, c2_role] + ([] if c2_crit=="(ninguna)" else [c2_crit])].copy()
     base.rename(columns={c2_user:"user", c2_role:"role", c2_crit:"is_critical" if c2_crit!="(ninguna)" else c2_crit}, inplace=True)
     base["role_norm"] = base["role"].astype(str).str.lower().str.strip()
+
     if c2_crit!="(ninguna)":
         base["critical_flag"] = base["is_critical"].astype(str).str.lower().isin(["1","true","si","sí","y","yes","x"])
     else:
@@ -264,8 +333,7 @@ if df2 is not None:
 
     methodology_box("""
 **Objetivo:** Identificar excesos de privilegios y conflictos SoD.  
-**Procedimiento:** Marcado de roles críticos por lista o columna; agregación de roles por usuario; contraste con reglas SoD.  
-**Riesgo:** Fraude por privilegios elevados y ausencia de controles compensatorios.
+**Procedimiento:** Marcado de roles críticos por lista o columna; agregación de roles por usuario; contraste con reglas SoD.
 """)
     recommendations_box([
         "Aplicar principio de privilegio mínimo.",
@@ -277,8 +345,19 @@ st.divider()
 
 # ========================== CAAT 3 ==========================
 st.header("🔗 CAAT 3 – Conciliación: logs del sistema vs transacciones")
-f3_logs = st.file_uploader("Logs del sistema (CSV/XLSX)", type=["csv","xlsx"], key="c3_logs")
-f3_tx   = st.file_uploader("Transacciones (CSV/XLSX)", type=["csv","xlsx"], key="c3_tx")
+
+with st.expander("¿Cómo usar CAAT 3?", expanded=show_tips):
+    st.markdown("""
+**Objetivo:** conciliar trazabilidad entre eventos de logs y registros transaccionales.
+
+**Pasos:**
+1) Sube **Logs (CSV)** y **Transacciones (CSV)**.
+2) Selecciona en ambos: **ID de transacción** y **Fecha/Hora**.
+3) Define tolerancia de desfase y revisa: sin correspondencia y desfaces.
+""")
+
+f3_logs = st.file_uploader("Logs del sistema (CSV)", type=["csv"], key="c3_logs")
+f3_tx   = st.file_uploader("Transacciones (CSV)", type=["csv"], key="c3_tx")
 df3L = read_any(f3_logs)
 df3T = read_any(f3_tx)
 
@@ -298,7 +377,6 @@ if df3L is not None and df3T is not None:
 
     L = df3L[[id_log, dt_log]].copy().rename(columns={id_log:"id", dt_log:"dtL"})
     T = df3T[[id_tx, dt_tx]].copy().rename(columns={id_tx:"id", dt_tx:"dtT"})
-    # >>> robusto ante columnas duplicadas o year/month/day
     L["dtL"] = ensure_datetime_series(L["dtL"])
     T["dtT"] = ensure_datetime_series(T["dtT"])
 
@@ -345,10 +423,19 @@ if df3L is not None and df3T is not None:
     st.caption("delay_sec > 0: transacción posterior al log; < 0: transacción antes del log (anómalo).")
     st.dataframe(merged.sort_values("delay_sec", key=lambda s: s.abs(), ascending=False).head(200), use_container_width=True)
 
+    # Exportación opcional de conciliación
+    merged_exp = merged.copy()
+    merged_exp["fecha_log"] = pd.to_datetime(merged_exp["dtL"]).dt.strftime("%Y-%m-%d").fillna("")
+    merged_exp["hora_log"]  = pd.to_datetime(merged_exp["dtL"]).dt.strftime("%H:%M:%S").fillna("")
+    merged_exp["fecha_tx"]  = pd.to_datetime(merged_exp["dtT"]).dt.strftime("%Y-%m-%d").fillna("")
+    merged_exp["hora_tx"]   = pd.to_datetime(merged_exp["dtT"]).dt.strftime("%H:%M:%S").fillna("")
+    merged_exp = merged_exp[["id","fecha_log","hora_log","fecha_tx","hora_tx","delay_sec"]]
+    csv = merged_exp.to_csv(index=False).encode("utf-8")
+    st.download_button("Descargar conciliación (CSV)", data=csv, file_name="conciliacion_caat3.csv")
+
     methodology_box("""
-**Objetivo:** Conciliar trazabilidad entre eventos de logs y registros transaccionales.  
-**Procedimiento:** Match por ID; listar sin correspondencia; calcular desfase y marcar fuera de tolerancia.  
-**Riesgo:** Registros apócrifos o errores de integración.
+**Objetivo:** Conciliar trazabilidad entre logs y transacciones.  
+**Procedimiento:** Match por ID; listar sin correspondencia; calcular desfase y marcar fuera de tolerancia.
 """)
     recommendations_box([
         "Asegurar correlación 1:1 entre eventos y asientos.",
@@ -359,7 +446,18 @@ st.divider()
 
 # ========================== CAAT 4 ==========================
 st.header("📈 CAAT 4 – Variación inusual de pagos a proveedores")
-f4 = st.file_uploader("Histórico de pagos (CSV/XLSX)", type=["csv","xlsx"], key="c4_file")
+
+with st.expander("¿Cómo usar CAAT 4?", expanded=show_tips):
+    st.markdown("""
+**Objetivo:** detectar picos/caídas inusuales en pagos.
+
+**Pasos:**
+1) Sube **Pagos (CSV)**.
+2) Selecciona **Proveedor**, **Fecha** y **Monto**.
+3) Ajusta el umbral de outliers (|z| robusto).
+""")
+
+f4 = st.file_uploader("Histórico de pagos (CSV)", type=["csv"], key="c4_file")
 df4 = read_any(f4)
 
 if df4 is not None:
@@ -376,7 +474,6 @@ if df4 is not None:
     dfp["fecha"] = ensure_datetime_series(dfp["fecha"])
     dfp["monto"] = pd.to_numeric(dfp["monto"], errors="coerce").fillna(0.0)
 
-    # Filtros interactivos
     fcol1, fcol2 = st.columns(2)
     min_date = pd.to_datetime(dfp["fecha"].min())
     max_date = pd.to_datetime(dfp["fecha"].max())
@@ -386,8 +483,7 @@ if df4 is not None:
     proveedor_sel = fcol2.multiselect("Filtrar proveedores", sorted(dfp["proveedor"].dropna().unique().tolist()))
 
     if len(date_range)==2:
-        d1 = pd.to_datetime(date_range[0])
-        d2 = pd.to_datetime(date_range[1])
+        d1 = pd.to_datetime(date_range[0]); d2 = pd.to_datetime(date_range[1])
         dfp = dfp[(dfp["fecha"]>=d1) & (dfp["fecha"]<=d2)]
     if proveedor_sel:
         dfp = dfp[dfp["proveedor"].isin(proveedor_sel)]
@@ -395,7 +491,6 @@ if df4 is not None:
     dfp["year_month"] = dfp["fecha"].dt.to_period("M").astype(str)
     monthly = dfp.groupby(["proveedor","year_month"], as_index=False)["monto"].sum()
 
-    # Umbral ajustable
     z_thr = st.slider("Umbral |z| (robusto)", 2.0, 5.0, 3.0, 0.1)
     def robust_z_values(arr):
         arr = np.asarray(arr, dtype=float)
@@ -406,11 +501,9 @@ if df4 is not None:
     out_rows = []
     for sup, grp in monthly.groupby("proveedor"):
         z = robust_z_values(grp["monto"].values)
-        grp2 = grp.copy()
-        grp2["zscore"] = z
+        grp2 = grp.copy(); grp2["zscore"] = z
         suspicious = grp2[np.abs(grp2["zscore"]) >= z_thr].copy()
-        if not suspicious.empty:
-            out_rows.append(suspicious)
+        if not suspicious.empty: out_rows.append(suspicious)
     out_df = pd.concat(out_rows, ignore_index=True) if out_rows else pd.DataFrame(columns=["proveedor","year_month","monto","zscore"])
 
     total_rows = len(dfp)
@@ -432,9 +525,8 @@ if df4 is not None:
         st.line_chart(trend.set_index("year_month"))
 
     methodology_box("""
-**Objetivo:** Detectar picos o caídas inusuales en pagos a proveedores.  
-**Procedimiento:** Agregación mensual por proveedor; z-score robusto (mediana/MAD) y marca de outliers con umbral ajustable.  
-**Riesgo:** Pagos simulados, errores y duplicados.
+**Objetivo:** Detectar picos o caídas inusuales en pagos.  
+**Procedimiento:** Agregación mensual por proveedor; z-score robusto (mediana/MAD) con umbral ajustable.
 """)
     recommendations_box([
         "Solicitar soportes para meses con picos.",
@@ -446,7 +538,18 @@ st.divider()
 
 # ========================== CAAT 5 ==========================
 st.header("✅ CAAT 5 – Verificación de criterios de selección de proveedores")
-f5 = st.file_uploader("Maestro de proveedores (CSV/XLSX)", type=["csv","xlsx"], key="c5_file")
+
+with st.expander("¿Cómo usar CAAT 5?", expanded=show_tips):
+    st.markdown("""
+**Objetivo:** validar criterios mínimos de selección y permanencia de proveedores.
+
+**Pasos:**
+1) Sube maestro de **Proveedores (CSV)**.
+2) Selecciona columnas: Proveedor, RUC, y (opcional) Blacklist, Fecha vigencia, Cuenta validada, Aprobado.
+3) Marca criterios a verificar y fija fecha de corte.
+""")
+
+f5 = st.file_uploader("Maestro de proveedores (CSV)", type=["csv"], key="c5_file")
 df5 = read_any(f5)
 
 if df5 is not None:
@@ -458,8 +561,9 @@ if df5 is not None:
     c5_sup = c5a.selectbox("Columna Proveedor", cols5)
     c5_ruc = c5b.selectbox("Columna RUC (tax id)", cols5)
     c5_bl  = c5c.selectbox("Columna Blacklist/Sanción (1/0 o Sí/No)", ["(ninguna)"]+cols5)
+
     c5d, c5e, c5f = st.columns(3)
-    c5_doc = c5d.selectbox("Columna Fecha vigencia documento", ["(ninguna)"]+cols5)
+    c5_doc  = c5d.selectbox("Columna Fecha vigencia documento", ["(ninguna)"]+cols5)
     c5_bank = c5e.selectbox("Columna Cuenta bancaria validada (1/0, Sí/No)", ["(ninguna)"]+cols5)
     c5_appr = c5f.selectbox("Columna Aprobado/Precalificado (1/0, Sí/No)", ["(ninguna)"]+cols5)
 
@@ -525,8 +629,7 @@ if df5 is not None:
 
     methodology_box("""
 **Objetivo:** Validar criterios mínimos de selección y permanencia de proveedores.  
-**Procedimiento:** Verificación de formato RUC, blacklist, vigencia documental a una fecha de corte, validación bancaria y aprobación.  
-**Riesgo:** Selección de proveedores no idóneos, sanciones y pagos indebidos.
+**Procedimiento:** Verificación de formato RUC, blacklist, vigencia documental a una fecha de corte, validación bancaria y aprobación.
 """)
     recommendations_box([
         "Bloquear compras a proveedores no aprobados o con documentos vencidos.",
@@ -535,4 +638,4 @@ if df5 is not None:
     ])
 
 st.markdown("---")
-st.caption("© 2025 – Proyecto académico. Esta app muestra el análisis dentro de la web con controles interactivos.")
+st.caption("© 2025 – Proyecto académico. Esta app trabaja con CSV para evitar dependencias de Excel.")
