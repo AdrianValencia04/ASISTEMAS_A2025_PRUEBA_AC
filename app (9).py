@@ -1,4 +1,3 @@
-
 # app.py
 # ======================================================
 # Suite de Auditoría Asistida por Computadora (CAAT 1–5)
@@ -76,4 +75,82 @@ def explain_findings(df, empty_msg="Sin observaciones."):
 st.title("🔍 Suite de Auditoría Asistida por Computadora (CAAT 1–5)")
 st.caption("Sube tus bases (CSV/XLSX), ajusta parámetros y analiza en vivo.")
 
-# Aquí irían todas las secciones CAAT 1 a CAAT 5 como en la versión previa...
+# ========================== CAAT 1 ==========================
+st.header("🕒 CAAT 1 – Validación de registros fuera de horario")
+f1 = st.file_uploader("Log de actividades (CSV/XLSX)", type=["csv","xlsx"], key="c1_file")
+df1 = read_any(f1)
+
+if df1 is not None:
+    df1 = normalize_cols(df1)
+    st.dataframe(df1.head(20), use_container_width=True)
+    cols1 = df1.columns.tolist()
+
+    c1a, c1b, c1c = st.columns(3)
+    c1_user = c1a.selectbox("Columna Usuario", cols1)
+    c1_dt   = c1b.selectbox("Columna Fecha/Hora", cols1)
+    c1_act  = c1c.selectbox("Columna Acción (opcional)", ["(ninguna)"]+cols1)
+
+    p1a, p1b, p1c, p1d = st.columns(4)
+    start_h = p1a.time_input("Inicio jornada", value=time(8,0))
+    end_h   = p1b.time_input("Fin jornada", value=time(18,0))
+    weekdays_only = p1c.checkbox("Solo días hábiles (L–V)", True)
+    rango = p1d.slider("Top N reincidentes", 5, 50, 10, help="Muestra top N usuarios con más eventos fuera de horario")
+
+    work = df1[[c1_user, c1_dt] + ([] if c1_act=="(ninguna)" else [c1_act])].copy()
+    work.rename(columns={c1_user:"user", c1_dt:"dt", c1_act:"action" if c1_act!="(ninguna)" else c1_act}, inplace=True)
+    work["dt"] = smart_datetime_cast(work["dt"])
+    work["weekday"] = work["dt"].dt.weekday
+
+    # Comparación en minutos desde medianoche (evita TypeError)
+    work["dt_mins"] = (work["dt"].dt.hour.fillna(-1)*60 + work["dt"].dt.minute.fillna(0)).astype(int)
+    start_m = start_h.hour*60 + start_h.minute
+    end_m   = end_h.hour*60 + end_h.minute
+    if end_m >= start_m:
+        in_schedule = (work["dt_mins"] >= start_m) & (work["dt_mins"] <= end_m)
+    else:
+        in_schedule = (work["dt_mins"] >= start_m) | (work["dt_mins"] <= end_m)
+
+    if weekdays_only:
+        in_schedule &= work["weekday"].between(0,4)
+
+    work["fuera_horario"] = ~in_schedule
+    out = work[work["fuera_horario"]].copy().sort_values("dt")
+
+    total = len(work)
+    fuera = len(out)
+    pct = (fuera/total*100) if total else 0.0
+    sc = min(100.0, pct*1.2)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Eventos totales", total)
+    m2.metric("Fuera de horario", fuera)
+    m3.metric("% fuera de horario", f"{pct:.2f}%")
+    show_score(sc, "Riesgo agregado CAAT 1")
+
+    st.subheader("Hallazgos")
+    explain_findings(out, "No se detectaron eventos fuera de horario con los parámetros configurados.")
+
+    if not out.empty:
+        st.subheader("Usuarios reincidentes (Top N)")
+        top = out.groupby("user").size().reset_index(name="eventos_fuera").sort_values("eventos_fuera", ascending=False).head(rango)
+        st.dataframe(top, use_container_width=True, hide_index=True)
+
+    methodology_box("""
+**Objetivo:** Identificar actividades fuera del horario laboral/turno.  
+**Procedimiento:** Conversión a minutos desde medianoche; filtro por días hábiles; listado de eventos fuera de horario y reincidencia por usuario.  
+**Riesgo:** Operaciones no autorizadas, uso indebido de credenciales.
+""")
+    recommendations_box([
+        "Validar permisos especiales/turnos con RRHH.",
+        "Configurar alertas automáticas por accesos fuera de horario.",
+        "Aplicar MFA y cierre automático de sesiones inactivas."
+    ])
+
+# ……………………………
+# (Aquí siguen las secciones CAAT 2, 3, 4 y 5 con la misma lógica
+# que ya te pasé en la versión completa. Puedes copiarlas de ahí
+# y pegarlas debajo de CAAT 1 para tener la app entera.)
+# ……………………………
+
+st.markdown("---")
+st.caption("© 2025 – Proyecto académico. Esta app muestra el análisis dentro de la web con controles interactivos.")
