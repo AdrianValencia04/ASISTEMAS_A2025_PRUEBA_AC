@@ -98,7 +98,7 @@ if df1 is not None:
 
     work = df1[[c1_user, c1_dt] + ([] if c1_act=="(ninguna)" else [c1_act])].copy()
     work.rename(columns={c1_user:"user", c1_dt:"dt", c1_act:"action" if c1_act!="(ninguna)" else c1_act}, inplace=True)
-    work["dt"] = smart_datetime_cast(work["dt"])
+    work["dt"] = ensure_datetime_series(work["dt"])
     work["weekday"] = work["dt"].dt.weekday
 
     # Comparación en minutos desde medianoche (evita TypeError)
