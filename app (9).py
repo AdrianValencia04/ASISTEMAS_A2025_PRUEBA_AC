@@ -2,7 +2,7 @@
 # ======================================================
 # Aprendizaje Colaborativo y Práctico – 2do Parcial
 # Suite didáctica de herramientas CAAT (1–5) en una sola página.
-# Lectura preferida: CSV (sin dependencias extra).
+# Lee CSV y XLSX (engine=openpyxl).
 # ======================================================
 
 import streamlit as st
@@ -19,29 +19,46 @@ st.set_page_config(
 
 def read_any(file):
     """
-    Lector seguro de archivos. Soporta CSV nativamente.
-    Si suben XLSX/XLS, muestra un mensaje para convertir a CSV (evitamos openpyxl/xlrd).
+    Lector flexible:
+    - CSV: pd.read_csv (detecta separador)
+    - XLSX: pd.read_excel con engine='openpyxl' (permite seleccionar hoja)
     """
     if file is None:
         return None
+
     name = file.name.lower()
-    try:
-        if name.endswith(".csv"):
-            # infiere separador y codificación
+
+    # CSV directo
+    if name.endswith(".csv"):
+        try:
             return pd.read_csv(file, encoding="utf-8", sep=None, engine="python")
-        elif name.endswith(".xlsx") or name.endswith(".xls"):
-            st.error(
-                "Esta app trabaja con **CSV** para evitar dependencias de Excel. "
-                "Abre tu archivo en Excel y usa **Guardar como → CSV (UTF-8)**, "
-                "luego vuelve a subirlo."
-            )
+        except Exception as e:
+            st.error(f"No se pudo leer el CSV: {e}")
             return None
-        else:
-            st.error("Formato no soportado. Sube un archivo **.csv**.")
+
+    # Excel (xlsx)
+    if name.endswith(".xlsx"):
+        try:
+            # Primero detectamos las hojas disponibles
+            xls = pd.ExcelFile(file, engine="openpyxl")
+            sheet = st.session_state.get(f"sheet_sel_{name}")
+            if sheet not in xls.sheet_names:
+                # Mostrar selector de hoja la primera vez
+                sheet = st.selectbox(
+                    "Hoja a leer (XLSX)",
+                    xls.sheet_names,
+                    key=f"sheet_sel_{name}"
+                )
+            # Volvemos a abrir porque el puntero avanzó
+            file.seek(0)
+            return pd.read_excel(file, sheet_name=sheet, engine="openpyxl")
+        except Exception as e:
+            st.error(f"No se pudo leer el Excel (.xlsx): {e}")
             return None
-    except Exception as e:
-        st.error(f"Error al leer el archivo: {e}")
-        return None
+
+    st.error("Formato no soportado. Sube **.csv** o **.xlsx**.")
+    return None
+
 
 def normalize_cols(df):
     """
@@ -62,12 +79,14 @@ def normalize_cols(df):
     df.columns = new_cols
     return df
 
+
 def smart_datetime_cast(series):
     """Conversión segura a datetime cuando 'series' SÍ es una Serie."""
     try:
         return pd.to_datetime(series, errors="coerce", infer_datetime_format=True)
     except Exception:
         return pd.to_datetime(series, errors="coerce")
+
 
 def ensure_datetime_series(col):
     """
@@ -100,12 +119,14 @@ def ensure_datetime_series(col):
         col = col.iloc[:, 0]
     return smart_datetime_cast(col)
 
+
 def risk_label(score):
     if score >= 80: return "Crítico"
     if score >= 60: return "Alto"
     if score >= 40: return "Medio"
     if score >= 20: return "Bajo"
     return "Muy Bajo"
+
 
 def show_score(score, title="Riesgo agregado"):
     col1, col2 = st.columns([1,2])
@@ -114,13 +135,16 @@ def show_score(score, title="Riesgo agregado"):
     bar = "█" * int(pct*25) + "░" * (25-int(pct*25))
     col2.code(f"[{bar}] {score:.0f} ({risk_label(score)})")
 
+
 def methodology_box(text):
     with st.expander("Metodología aplicada (cómo y por qué)"):
         st.markdown(text)
 
+
 def recommendations_box(items):
     with st.expander("Recomendaciones"):
         st.markdown("\n".join([f"- {i}" for i in items]))
+
 
 def explain_findings(df, empty_msg="Sin observaciones."):
     if df is None or df.empty:
@@ -131,11 +155,12 @@ def explain_findings(df, empty_msg="Sin observaciones."):
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Descargar hallazgos (CSV)", data=csv, file_name="hallazgos.csv")
 
+
 # -------- Encabezado global --------
 st.title("🔍 Aprendizaje Colaborativo y Práctico – 2do Parcial")
 st.caption("Suite didáctica de herramientas CAAT para auditoría de bases de datos y sistemas (CAAT 1–5).")
 show_tips = st.checkbox("🛈 Mostrar ayudas en pantalla", value=True)
-st.markdown("> **Nota:** esta app usa archivos **CSV** para simplificar la carga y evitar dependencias de Excel.")
+st.markdown("> **Nota:** esta app lee **CSV** y **XLSX** (Excel). Para Excel usa `openpyxl` automáticamente.")
 
 # ========================== CAAT 1 ==========================
 st.header("🕒 Módulo 1: Registros fuera de horario (CAAT 1)")
@@ -150,7 +175,7 @@ with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
 5) Revisa **métricas**, **hallazgos** y descarga el **CSV** para evidencias.
 """)
 
-f1 = st.file_uploader("Log de actividades (CSV)", type=["csv"], key="c1_file")
+f1 = st.file_uploader("Log de actividades (CSV o XLSX)", type=["csv","xlsx"], key="c1_file")
 df1 = read_any(f1)
 
 if df1 is not None:
@@ -252,7 +277,7 @@ with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
 4) Revisa usuarios críticos y violaciones; descarga hallazgos.
 """)
 
-f2 = st.file_uploader("Usuarios/Roles (CSV)", type=["csv"], key="c2_file")
+f2 = st.file_uploader("Usuarios/Roles (CSV o XLSX)", type=["csv","xlsx"], key="c2_file")
 df2 = read_any(f2)
 
 if df2 is not None:
@@ -337,22 +362,20 @@ st.caption("Objetivo: conciliar trazabilidad entre eventos de sistema y registro
 
 with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-1) Sube **Logs (CSV)** y **Transacciones (CSV)**.
+1) Sube **Logs** y **Transacciones** (CSV o XLSX).
 2) Selecciona en ambos: **ID de transacción** y **Fecha/Hora**.
 3) Define tolerancia de desfase y revisa: sin correspondencia y desfaces.
 """)
 
-f3_logs = st.file_uploader("Logs del sistema (CSV)", type=["csv"], key="c3_logs")
-f3_tx   = st.file_uploader("Transacciones (CSV)", type=["csv"], key="c3_tx")
+f3_logs = st.file_uploader("Logs del sistema (CSV o XLSX)", type=["csv","xlsx"], key="c3_logs")
+f3_tx   = st.file_uploader("Transacciones (CSV o XLSX)", type=["csv","xlsx"], key="c3_tx")
 df3L = read_any(f3_logs)
 df3T = read_any(f3_tx)
 
 if df3L is not None and df3T is not None:
     df3L, df3T = normalize_cols(df3L), normalize_cols(df3T)
-    st.markdown("**Vista rápida – Logs**")
-    st.dataframe(df3L.head(15), use_container_width=True)
-    st.markdown("**Vista rápida – Transacciones**")
-    st.dataframe(df3T.head(15), use_container_width=True)
+    st.markdown("**Vista rápida – Logs**"); st.dataframe(df3L.head(15), use_container_width=True)
+    st.markdown("**Vista rápida – Transacciones**"); st.dataframe(df3T.head(15), use_container_width=True)
 
     c3a, c3b = st.columns(2)
     id_log = c3a.selectbox("Logs: columna ID transacción", df3L.columns.tolist())
@@ -399,17 +422,13 @@ if df3L is not None and df3T is not None:
     m4.metric(f"Desfaces > {tol_min} min", out_count)
     show_score(score3, "Riesgo agregado CAAT 3")
 
-    st.subheader("IDs presentes solo en logs")
-    explain_findings(df_solo_logs, "No hay IDs exclusivos en logs.")
-
-    st.subheader("IDs presentes solo en transacciones")
-    explain_findings(df_solo_tx, "No hay IDs exclusivos en transacciones.")
+    st.subheader("IDs presentes solo en logs"); explain_findings(df_solo_logs, "No hay IDs exclusivos en logs.")
+    st.subheader("IDs presentes solo en transacciones"); explain_findings(df_solo_tx, "No hay IDs exclusivos en transacciones.")
 
     st.subheader("Desfaces (primer log vs primera transacción)")
     st.caption("delay_sec > 0: transacción posterior al log; < 0: transacción antes del log (anómalo).")
     st.dataframe(merged.sort_values("delay_sec", key=lambda s: s.abs(), ascending=False).head(200), use_container_width=True)
 
-    # Exportación opcional de conciliación
     merged_exp = merged.copy()
     merged_exp["fecha_log"] = pd.to_datetime(merged_exp["dtL"]).dt.strftime("%Y-%m-%d").fillna("")
     merged_exp["hora_log"]  = pd.to_datetime(merged_exp["dtL"]).dt.strftime("%H:%M:%S").fillna("")
@@ -436,12 +455,12 @@ st.caption("Objetivo: encontrar picos/caídas atípicas en pagos mensuales por p
 
 with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-1) Sube **Pagos (CSV)**.
+1) Sube **Pagos** (CSV o XLSX).
 2) Selecciona **Proveedor**, **Fecha** y **Monto**.
 3) Ajusta el **umbral de outliers (|z| robusto)**.
 """)
 
-f4 = st.file_uploader("Histórico de pagos (CSV)", type=["csv"], key="c4_file")
+f4 = st.file_uploader("Histórico de pagos (CSV o XLSX)", type=["csv","xlsx"], key="c4_file")
 df4 = read_any(f4)
 
 if df4 is not None:
@@ -459,8 +478,7 @@ if df4 is not None:
     dfp["monto"] = pd.to_numeric(dfp["monto"], errors="coerce").fillna(0.0)
 
     fcol1, fcol2 = st.columns(2)
-    min_date = pd.to_datetime(dfp["fecha"].min())
-    max_date = pd.to_datetime(dfp["fecha"].max())
+    min_date = pd.to_datetime(dfp["fecha"].min()); max_date = pd.to_datetime(dfp["fecha"].max())
     if pd.isna(min_date): min_date = datetime.today()
     if pd.isna(max_date): max_date = datetime.today()
     date_range = fcol1.date_input("Rango de fechas", value=(min_date.date(), max_date.date()))
@@ -528,12 +546,12 @@ st.caption("Objetivo: validar criterios mínimos de selección y permanencia de 
 
 with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-1) Sube maestro de **Proveedores (CSV)**.
+1) Sube maestro de **Proveedores** (CSV o XLSX).
 2) Selecciona columnas: Proveedor, RUC, y (opcional) Blacklist, Fecha vigencia, Cuenta validada, Aprobado.
 3) Marca criterios a verificar y fija **fecha de corte**.
 """)
 
-f5 = st.file_uploader("Maestro de proveedores (CSV)", type=["csv"], key="c5_file")
+f5 = st.file_uploader("Maestro de proveedores (CSV o XLSX)", type=["csv","xlsx"], key="c5_file")
 df5 = read_any(f5)
 
 if df5 is not None:
@@ -622,4 +640,4 @@ if df5 is not None:
     ])
 
 st.markdown("---")
-st.caption("© 2025 – Proyecto académico. Esta app trabaja con CSV para evitar dependencias de Excel.")
+st.caption("© 2025 – Proyecto académico.")
