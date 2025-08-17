@@ -1,8 +1,8 @@
 # app.py
 # ======================================================
-# Suite de Auditoría Asistida por Computadora (CAAT 1–5)
-# Una sola página con secciones interactivas.
-# Formato de entrada recomendado: CSV (sin dependencias extra).
+# Aprendizaje Colaborativo y Práctico – 2do Parcial
+# Suite didáctica de herramientas CAAT (1–5) en una sola página.
+# Lectura preferida: CSV (sin dependencias extra).
 # ======================================================
 
 import streamlit as st
@@ -10,7 +10,10 @@ import pandas as pd
 import numpy as np
 from datetime import time, datetime
 
-st.set_page_config(page_title="Suite de Auditoría Asistida por Computadora (CAAT 1–5)", layout="wide")
+st.set_page_config(
+    page_title="Aprendizaje Colaborativo y Práctico – 2do Parcial",
+    layout="wide"
+)
 
 # ================= Utilidades robustas =================
 
@@ -27,11 +30,14 @@ def read_any(file):
             # infiere separador y codificación
             return pd.read_csv(file, encoding="utf-8", sep=None, engine="python")
         elif name.endswith(".xlsx") or name.endswith(".xls"):
-            st.error("Este entorno está configurado para usar **CSV**. "
-                     "Por favor conviértelo a CSV desde Excel (Guardar como → CSV) y vuelve a subirlo.")
+            st.error(
+                "Esta app trabaja con **CSV** para evitar dependencias de Excel. "
+                "Abre tu archivo en Excel y usa **Guardar como → CSV (UTF-8)**, "
+                "luego vuelve a subirlo."
+            )
             return None
         else:
-            st.error("Formato no soportado. Sube CSV.")
+            st.error("Formato no soportado. Sube un archivo **.csv**.")
             return None
     except Exception as e:
         st.error(f"Error al leer el archivo: {e}")
@@ -125,32 +131,26 @@ def explain_findings(df, empty_msg="Sin observaciones."):
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Descargar hallazgos (CSV)", data=csv, file_name="hallazgos.csv")
 
-# -------- Modo guía (ayudas en la UI) --------
-st.title("🔍 Suite de Auditoría Asistida por Computadora (CAAT 1–5)")
-st.caption("Sube tus bases (CSV), ajusta parámetros y analiza en vivo.")
+# -------- Encabezado global --------
+st.title("🔍 Aprendizaje Colaborativo y Práctico – 2do Parcial")
+st.caption("Suite didáctica de herramientas CAAT para auditoría de bases de datos y sistemas (CAAT 1–5).")
 show_tips = st.checkbox("🛈 Mostrar ayudas en pantalla", value=True)
+st.markdown("> **Nota:** esta app usa archivos **CSV** para simplificar la carga y evitar dependencias de Excel.")
 
 # ========================== CAAT 1 ==========================
-st.header("🕒 CAAT 1 – Validación de registros fuera de horario")
+st.header("🕒 Módulo 1: Registros fuera de horario (CAAT 1)")
+st.caption("Objetivo: identificar eventos fuera del horario laboral definido por el auditor.")
 
-with st.expander("¿Cómo usar CAAT 1?", expanded=show_tips):
+with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-**Objetivo:** detectar eventos fuera del horario laboral que definas.
-
-**Pasos:**
-1) **Columna Usuario** → quién ejecuta (ej.: `Usuario`, `user`).
-2) **Columna Fecha/Hora** → momento del evento (ej.: `Timestamp`, `Fecha_Registro`).  
-   *Si no es fecha válida, la app te avisará.*
-3) *(Opcional)* **Acción** → severidad/acción (ej.: `Severidad`, `Accion`).
-4) Ajusta horario y marca **Solo días hábiles** si aplica.
-5) Revisa métricas, hallazgos y descarga el CSV.
+1) **Usuario**: quién ejecuta el evento (ej.: `Usuario`, `user`, `Empleado`).
+2) **Fecha/Hora**: momento del evento (ej.: `Timestamp`, `Fecha_Registro`).
+3) *(Opcional)* **Acción/Severidad**: si tu log la tiene (ej.: `Severidad`, `Acción`).
+4) Define el **horario laboral** y marca **solo días hábiles** si aplica.
+5) Revisa **métricas**, **hallazgos** y descarga el **CSV** para evidencias.
 """)
 
-f1 = st.file_uploader(
-    "Log de actividades (CSV)",
-    type=["csv"], key="c1_file",
-    help=("Sube CSV con al menos Usuario y Fecha/Hora." if show_tips else None)
-)
+f1 = st.file_uploader("Log de actividades (CSV)", type=["csv"], key="c1_file")
 df1 = read_any(f1)
 
 if df1 is not None:
@@ -159,22 +159,15 @@ if df1 is not None:
     cols1 = df1.columns.tolist()
 
     c1a, c1b, c1c = st.columns(3)
-    c1_user = c1a.selectbox("Columna Usuario", cols1,
-                            help=("Identificador de quien ejecuta la acción." if show_tips else None))
-    c1_dt   = c1b.selectbox("Columna Fecha/Hora", cols1,
-                            help=("Fecha y hora del evento." if show_tips else None))
-    c1_act  = c1c.selectbox("Columna Acción (opcional)", ["(ninguna)"]+cols1,
-                            help=("Tipo de evento/severidad si existe." if show_tips else None))
+    c1_user = c1a.selectbox("Columna Usuario", cols1)
+    c1_dt   = c1b.selectbox("Columna Fecha/Hora", cols1)
+    c1_act  = c1c.selectbox("Columna Acción (opcional)", ["(ninguna)"]+cols1)
 
     p1a, p1b, p1c, p1d = st.columns(4)
-    start_h = p1a.time_input("Inicio jornada", value=time(8,0),
-                             help=("Hora de inicio laboral." if show_tips else None))
-    end_h   = p1b.time_input("Fin jornada", value=time(18,0),
-                             help=("Hora de fin laboral." if show_tips else None))
-    weekdays_only = p1c.checkbox("Solo días hábiles (L–V)", True,
-                                 help=("Ignora sábado y domingo." if show_tips else None))
-    rango = p1d.slider("Top N reincidentes", 5, 50, 10,
-                       help=("Usuarios con más eventos fuera de horario." if show_tips else None))
+    start_h = p1a.time_input("Inicio jornada", value=time(8,0))
+    end_h   = p1b.time_input("Fin jornada", value=time(18,0))
+    weekdays_only = p1c.checkbox("Solo días hábiles (L–V)", True)
+    rango = p1d.slider("Top N reincidentes", 5, 50, 10)
 
     work = df1[[c1_user, c1_dt] + ([] if c1_act=="(ninguna)" else [c1_act])].copy()
     work.rename(columns={c1_user:"user", c1_dt:"dt", c1_act:"action" if c1_act!="(ninguna)" else c1_act}, inplace=True)
@@ -220,8 +213,6 @@ if df1 is not None:
     m1.metric("Eventos totales", total)
     m2.metric("Fuera de horario", fuera)
     m3.metric("% fuera de horario", f"{pct:.2f}%")
-    if show_tips:
-        st.caption("• El % se calcula sobre eventos convertidos correctamente a fecha/hora.")
 
     show_score(sc, "Riesgo agregado CAAT 1")
 
@@ -231,8 +222,7 @@ if df1 is not None:
     else:
         st.dataframe(out_report, use_container_width=True, hide_index=True)
         csv = out_report.to_csv(index=False).encode("utf-8")
-        st.download_button("Descargar hallazgos (CSV)", data=csv, file_name="hallazgos_caat1.csv",
-                           help=("Exporta usuario, fecha y hora legibles." if show_tips else None))
+        st.download_button("Descargar hallazgos (CSV)", data=csv, file_name="hallazgos_caat1.csv")
 
         st.subheader("Usuarios reincidentes (Top N)")
         top = out.groupby("user").size().reset_index(name="eventos_fuera").sort_values("eventos_fuera", ascending=False).head(rango)
@@ -251,17 +241,15 @@ Convierte la hora del evento a **minutos desde medianoche** y contrasta con el r
 st.divider()
 
 # ========================== CAAT 2 ==========================
-st.header("🛡️ CAAT 2 – Auditoría de privilegios (roles críticos y SoD)")
+st.header("🛡️ Módulo 2: Privilegios y SoD – Segregación de Funciones (CAAT 2)")
+st.caption("Objetivo: detectar excesos de privilegios y conflictos de Segregación de Funciones (SoD).")
 
-with st.expander("¿Cómo usar CAAT 2?", expanded=show_tips):
+with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-**Objetivo:** identificar excesos de privilegios y conflictos de Segregación de Funciones (SoD).
-
-**Pasos:**
-1) **Usuario** y **Rol/Perfil** (elige las columnas correctas).
+1) Selecciona **Usuario** y **Rol/Perfil**.
 2) Marca **roles críticos** (por columna o listado).
 3) Define **reglas SoD** (una por línea: `A -> B`).
-4) Revisa usuarios críticos y violaciones SoD; descarga hallazgos.
+4) Revisa usuarios críticos y violaciones; descarga hallazgos.
 """)
 
 f2 = st.file_uploader("Usuarios/Roles (CSV)", type=["csv"], key="c2_file")
@@ -344,13 +332,11 @@ if df2 is not None:
 st.divider()
 
 # ========================== CAAT 3 ==========================
-st.header("🔗 CAAT 3 – Conciliación: logs del sistema vs transacciones")
+st.header("🔗 Módulo 3: Conciliación de logs vs transacciones (CAAT 3)")
+st.caption("Objetivo: conciliar trazabilidad entre eventos de sistema y registros transaccionales.")
 
-with st.expander("¿Cómo usar CAAT 3?", expanded=show_tips):
+with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-**Objetivo:** conciliar trazabilidad entre eventos de logs y registros transaccionales.
-
-**Pasos:**
 1) Sube **Logs (CSV)** y **Transacciones (CSV)**.
 2) Selecciona en ambos: **ID de transacción** y **Fecha/Hora**.
 3) Define tolerancia de desfase y revisa: sin correspondencia y desfaces.
@@ -445,16 +431,14 @@ if df3L is not None and df3T is not None:
 st.divider()
 
 # ========================== CAAT 4 ==========================
-st.header("📈 CAAT 4 – Variación inusual de pagos a proveedores")
+st.header("📈 Módulo 4: Variación inusual de pagos – outliers (CAAT 4)")
+st.caption("Objetivo: encontrar picos/caídas atípicas en pagos mensuales por proveedor.")
 
-with st.expander("¿Cómo usar CAAT 4?", expanded=show_tips):
+with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-**Objetivo:** detectar picos/caídas inusuales en pagos.
-
-**Pasos:**
 1) Sube **Pagos (CSV)**.
 2) Selecciona **Proveedor**, **Fecha** y **Monto**.
-3) Ajusta el umbral de outliers (|z| robusto).
+3) Ajusta el **umbral de outliers (|z| robusto)**.
 """)
 
 f4 = st.file_uploader("Histórico de pagos (CSV)", type=["csv"], key="c4_file")
@@ -491,7 +475,9 @@ if df4 is not None:
     dfp["year_month"] = dfp["fecha"].dt.to_period("M").astype(str)
     monthly = dfp.groupby(["proveedor","year_month"], as_index=False)["monto"].sum()
 
-    z_thr = st.slider("Umbral |z| (robusto)", 2.0, 5.0, 3.0, 0.1)
+    z_thr = st.slider("Umbral |z| (robusto)", 2.0, 5.0, 3.5, 0.1,
+                      help=("Valores mayores al umbral se marcan como atípicos (mediana/MAD)." if show_tips else None))
+
     def robust_z_values(arr):
         arr = np.asarray(arr, dtype=float)
         med = np.median(arr)
@@ -537,16 +523,14 @@ if df4 is not None:
 st.divider()
 
 # ========================== CAAT 5 ==========================
-st.header("✅ CAAT 5 – Verificación de criterios de selección de proveedores")
+st.header("✅ Módulo 5: Criterios de selección de proveedores (CAAT 5)")
+st.caption("Objetivo: validar criterios mínimos de selección y permanencia de proveedores.")
 
-with st.expander("¿Cómo usar CAAT 5?", expanded=show_tips):
+with st.expander("¿Cómo usar este módulo?", expanded=show_tips):
     st.markdown("""
-**Objetivo:** validar criterios mínimos de selección y permanencia de proveedores.
-
-**Pasos:**
 1) Sube maestro de **Proveedores (CSV)**.
 2) Selecciona columnas: Proveedor, RUC, y (opcional) Blacklist, Fecha vigencia, Cuenta validada, Aprobado.
-3) Marca criterios a verificar y fija fecha de corte.
+3) Marca criterios a verificar y fija **fecha de corte**.
 """)
 
 f5 = st.file_uploader("Maestro de proveedores (CSV)", type=["csv"], key="c5_file")
