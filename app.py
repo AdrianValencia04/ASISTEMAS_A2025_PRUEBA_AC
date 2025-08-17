@@ -1,768 +1,766 @@
-# -*- coding: utf-8 -*-
-# App: Aprendizaje Colaborativo y Práctico – 2do Parcial
-# Suite de CAATs (1–5) con ayudas, validaciones, reportes por módulo
-# y reporte consolidado con resumen ejecutivo.
+# ------------------------------------------------------------
+# Aprendizaje Colaborativo y Práctico – 2do Parcial
+# Suite de Auditoría Asistida por Computadora (CAAT 1–5)
+# + Modo Libre para archivos arbitrarios
+# ------------------------------------------------------------
+# Características:
+# - Carga robusta de CSV/XLSX (con mensajes claros si falla).
+# - Selectbox con keys únicos (evita StreamlitDuplicateElementId).
+# - Normalización de columnas y autodetección de sinónimos.
+# - Validaciones previas y ayudas inline (tooltips).
+# - Reportes descargables en todos los módulos.
+# - Pestaña "📦 Modo Libre" para subir cualquier archivo y analizar
+#   con cualquiera de los CAAT (asistente de mapeo).
+# ------------------------------------------------------------
 
 import io
-import zipfile
-from datetime import datetime, time
-from typing import List, Tuple, Optional
-
+import sys
+import math
+import json
 import numpy as np
 import pandas as pd
 import streamlit as st
+from datetime import datetime, time, timedelta
 
-
-# ==============
-# CONFIG INICIAL
-# ==============
+# ==========================
+# Configuración general UI
+# ==========================
 st.set_page_config(
     page_title="Aprendizaje Colaborativo y Práctico – 2do Parcial",
-    page_icon="🔎",
-    layout="wide",
+    page_icon="🕵️",
+    layout="wide"
 )
 
-TITLE = "Aprendizaje Colaborativo y Práctico – 2do Parcial"
-SUBTITLE = "Suite de pruebas CAAT (1–5) para auditoría de datos con guías, validaciones y reportes."
+APP_TITLE = "Aprendizaje Colaborativo y Práctico – 2do Parcial"
+APP_SUBTITLE = "Suite de Auditoría Asistida por Computadora (CAAT 1–5)"
 
-if "reports" not in st.session_state:
-    # Lista de tuplas (titulo_visible, dataframe, nombre_archivo_sugerido)
-    st.session_state.reports: List[Tuple[str, pd.DataFrame, str]] = []
-if "metrics" not in st.session_state:
-    # Métricas por módulo para el resumen final
-    st.session_state.metrics = {}
+# Paletas breves para estados
+OK = "🟢"
+WARN = "🟡"
+ERR = "🔴"
 
-st.title(f"🔍 {TITLE}")
-st.caption(SUBTITLE)
+# =====================================
+# Utilidades: limpiar y lectura robusta
+# =====================================
 
-show_help = st.checkbox("Mostrar ayudas en pantalla", value=True)
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza nombres de columnas: minúsculas, sin espacios extras ni tildes."""
+    import unicodedata
+    def _norm(s):
+        s = str(s).strip().lower()
+        s = " ".join(s.split())
+        s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii')
+        s = s.replace(" ", "_")
+        return s
+    df = df.copy()
+    df.columns = [_norm(c) for c in df.columns]
+    return df
 
-st.divider()
+def try_read_csv(file) -> pd.DataFrame | None:
+    """Intenta leer CSV con encodings comunes."""
+    try:
+        return pd.read_csv(file)
+    except Exception:
+        file.seek(0)
+        try:
+            return pd.read_csv(file, encoding="latin-1")
+        except Exception:
+            return None
 
+def try_read_excel(file, sheet=None) -> tuple[pd.DataFrame | None, list[str] | None, str | None]:
+    """
+    Intenta preparar ExcelFile con openpyxl.
+    Devuelve (df, sheet_names, error_msg). Si sheet es None, no lee data sino solo las hojas.
+    """
+    try:
+        import openpyxl  # noqa: F401 (solo forzar import)
+    except Exception:
+        return None, None, "Falta el motor de Excel (openpyxl). Instálalo o sube CSV."
 
-# =================
-# FUNCIONES COMUNES
-# =================
-def info_help(msg: str):
-    if show_help:
-        st.info(msg)
+    try:
+        xls = pd.ExcelFile(file, engine="openpyxl")
+    except Exception:
+        return None, None, (
+            "No se pudo leer el Excel. Verifica que no esté protegido, "
+            "que no tenga contraseña y que sea .xlsx válido. También puedes subir CSV."
+        )
 
+    if sheet is None:
+        return None, xls.sheet_names, None
 
-def warn_help(msg: str):
-    st.warning(msg)
+    try:
+        df = xls.parse(sheet_name=sheet)
+        return df, xls.sheet_names, None
+    except Exception:
+        return None, xls.sheet_names, "No se pudo cargar la hoja seleccionada."
 
+def read_table_uploader(label: str, key_prefix: str, help_txt: str = "", accept_multiple: bool = False):
+    """
+    Cargador robusto universal:
+    - Acepta CSV y XLSX.
+    - Si es XLSX y tiene varias hojas, pedimos elegir con un selectbox (con key único).
+    - Devuelve (dataframes, filenames). Para accept_multiple=False, devuelve una lista de largo 1.
+    """
+    files = st.file_uploader(
+        label, type=["csv", "xlsx"], accept_multiple_files=accept_multiple,
+        help=help_txt, key=f"{key_prefix}_uploader"
+    )
+    if not files:
+        return [], []
 
-def error_help(msg: str):
-    st.error(msg)
+    results = []
+    names = []
 
+    # Coherencia de claves únicas en selectboxes
+    for idx, file in enumerate(files):
+        name = file.name
+        ext = name.split(".")[-1].lower()
 
-def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8-sig")
+        if ext == "csv":
+            df = try_read_csv(file)
+            if df is None:
+                st.error(f"{ERR} No se pudo leer el CSV '{name}'. Revisa el delimitador/encoding o sube otro archivo.")
+                continue
+            names.append(name)
+            results.append(normalize_columns(df))
 
+        elif ext == "xlsx":
+            # listar hojas primero
+            _, sheets, err = try_read_excel(file, sheet=None)
+            if err:
+                st.error(f"{ERR} {err}\nArchivo: {name}")
+                continue
+            if not sheets:
+                st.error(f"{ERR} El Excel '{name}' no tiene hojas visibles.")
+                continue
 
-def ensure_datetime(s: pd.Series) -> pd.Series:
-    """Convierte a datetime con coerción; retorna serie (puede contener NaT)."""
-    if not isinstance(s, pd.Series):
-        return pd.Series([], dtype="datetime64[ns]")
-    return pd.to_datetime(s, errors="coerce")
+            sheet = st.selectbox(
+                "Hoja de Excel",
+                options=sheets,
+                index=0,
+                key=f"{key_prefix}_sheet_{idx}",  # <- clave única
+                help="Selecciona la hoja que contiene tus datos"
+            )
+            file.seek(0)
+            df, _, err2 = try_read_excel(file, sheet=sheet)
+            if err2:
+                st.error(f"{ERR} {err2}\nArchivo: {name}")
+                continue
 
+            names.append(f"{name} :: {sheet}")
+            results.append(normalize_columns(df))
 
-def robust_zscore(x: np.ndarray) -> np.ndarray:
-    """z-score robusto usando mediana y MAD (sin scipy)."""
-    x = np.asarray(x, dtype="float64")
+        else:
+            st.warning(f"{WARN} Formato no soportado: {name}. Usa CSV o XLSX.")
+            continue
+
+    return results, names
+
+def ensure_datetime(series: pd.Series) -> pd.Series:
+    """Convierte a datetime con coerción y muestra advertencia si hay nulos."""
+    out = pd.to_datetime(series, errors="coerce")
+    nulls = out.isna().mean()
+    if nulls > 0:
+        st.warning(
+            f"{WARN} Algunas fechas no pudieron convertirse (nulos: {nulls:.1%}). "
+            "Revisa el formato o mapea otra columna."
+        )
+    return out
+
+def num_from_any(series: pd.Series) -> pd.Series:
+    """Limpia strings de dinero y convierte a número (coerce)."""
+    s = series.astype(str).str.replace(r"[^\d,.\-]", "", regex=True)
+    # Intento simple: si hay coma y punto, intentamos heurística; si solo coma, se asume decimal con coma.
+    # Luego a float con coerce.
+    def _to_float(x):
+        if x.count(",") > 0 and x.count(".") > 0:
+            # heurística: asume separador de miles con punto y decimal con coma
+            x = x.replace(".", "").replace(",", ".")
+        elif x.count(",") > 0 and x.count(".") == 0:
+            x = x.replace(",", ".")
+        try:
+            return float(x)
+        except Exception:
+            return np.nan
+    return s.map(_to_float)
+
+def robust_zscore(x: pd.Series) -> pd.Series:
+    """Z-score robusto usando MAD."""
+    x = pd.to_numeric(x, errors="coerce")
     med = np.nanmedian(x)
     mad = np.nanmedian(np.abs(x - med))
     if mad == 0 or np.isnan(mad):
-        return np.zeros_like(x)
-    return 0.6745 * (x - med) / mad
+        return pd.Series([0]*len(x), index=x.index)
+    z = 0.6745 * (x - med) / mad
+    return z
 
+# =====================================================
+# Autodetección de columnas (sinónimos por cada CAAT)
+# =====================================================
 
-def add_report(title: str, df: pd.DataFrame, filename: str):
-    if df is None or df.empty:
-        return
-    st.session_state.reports.append((title, df.copy(), filename))
+SYN = {
+    "usuario": ["usuario", "user", "empleado", "login", "account", "id_usuario", "usuario_id", "nombre_usuario"],
+    "fecha":   ["timestamp", "fecha", "datetime", "fh_evento", "fecha_registro", "fecha_hora"],
+    "accion":  ["accion", "evento", "operacion", "actividad", "actividad_desc", "severidad"],
+    "rol":     ["rol", "modulo", "perfil", "permiso", "grupo", "funcion"],
+    "critico": ["critico", "es_critico", "critical", "flag_critico", "criticidad", "nivel", "criticidad_modulo"],
+    "id":      ["id", "id_transaccion", "documento", "nro_doc", "referencia"],
+    "proveedor": ["proveedor", "vendor", "tercero", "ruc", "nit"],
+    "monto":   ["monto", "importe", "total", "valor", "debe", "haber", "pago"],
+}
 
+def suggest_col(df: pd.DataFrame, targets: list[str]) -> str | None:
+    """Devuelve el primer match de sinónimos que exista en el df."""
+    cols = list(df.columns)
+    for t in targets:
+        for syn in SYN.get(t, []):
+            if syn in cols:
+                return syn
+    return None
 
-def make_zip_reports() -> bytes:
-    """Crea un ZIP en memoria con los CSVs de st.session_state.reports y un resumen."""
+def map_to_bool(series: pd.Series) -> pd.Series:
+    """Mapeo amplio a booleano (sí/true/1/alto/critico...)."""
+    s = series.astype(str).str.strip().str.lower()
+    true_vals = {"1", "true", "t", "si", "sí", "y", "yes", "ok", "alto", "critico", "crítico"}
+    false_vals = {"0", "false", "f", "no", "n", "low", "bajo"}
+    out = pd.Series([np.nan]*len(s), index=s.index)
+    out[s.isin(true_vals)] = True
+    out[s.isin(false_vals)] = False
+    # Todo lo demás queda NaN → el usuario puede proveer lista de críticos
+    return out
+
+# ============================
+# Descargas helper
+# ============================
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
-        # Añadir todos los CSVs
-        for title, df, fname in st.session_state.reports:
-            z.writestr(fname, df.to_csv(index=False))
-        # Resumen ejecutivo
-        resumen = build_resumen_ejecutivo_text()
-        z.writestr("00_resumen_ejecutivo.txt", resumen)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="hallazgos")
     buffer.seek(0)
     return buffer.read()
 
-
-def build_resumen_ejecutivo_text() -> str:
-    """Genera un texto de resumen en base a st.session_state.metrics."""
-    mx = st.session_state.metrics
-
-    # Colecta puntuaciones (0-100) por módulo si están disponibles
-    puntajes = []
-    for k in ["CAAT1", "CAAT2", "CAAT3", "CAAT4", "CAAT5"]:
-        if k in mx and "score" in mx[k]:
-            puntajes.append(mx[k]["score"])
-    global_score = round(np.mean(puntajes), 2) if puntajes else 0.0
-
-    nivel = (
-        "Crítico" if global_score >= 80 else
-        "Alto" if global_score >= 60 else
-        "Medio" if global_score >= 40 else
-        "Bajo" if global_score >= 20 else
-        "Muy Bajo"
-    )
-
-    lines = []
-    lines.append("RESUMEN EJECUTIVO – Suite CAAT (1–5)")
-    lines.append(f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("")
-    lines.append(f"Índice global de riesgo: {global_score}/100 ({nivel})")
-    lines.append("")
-    lines.append("Detalle por módulo:")
-    for k, v in mx.items():
-        desc = v.get("desc", "")
-        score = v.get("score", "-")
-        extra = v.get("extra", "")
-        lines.append(f"  - {k}: {score}/100 {desc}")
-        if extra:
-            lines.append(f"      {extra}")
-    lines.append("")
-    lines.append("Conclusión automática:")
-    if global_score >= 80:
-        lines.append("- Se identifican riesgos críticos. Priorizar acciones inmediatas en los módulos con mayor puntaje.")
-    elif global_score >= 60:
-        lines.append("- Riesgo alto. Se recomienda implementar controles adicionales y seguimiento continuo.")
-    elif global_score >= 40:
-        lines.append("- Riesgo medio. Ajustar controles y monitorear áreas con hallazgos frecuentes.")
-    else:
-        lines.append("- Riesgo bajo/muy bajo. Mantener controles actuales y monitoreo periódico.")
-    lines.append("")
-    lines.append("Recomendaciones generales:")
-    lines.append("- Configurar alertas sobre actividades fuera de horario o picos de pagos.")
-    lines.append("- Revisar roles críticos y reglas SoD, reducir accesos innecesarios.")
-    lines.append("- Conciliar sistemáticamente logs vs. transacciones con tolerancias definidas.")
-    lines.append("- Verificar criterios de selección de proveedores y vigencias.")
-    return "\n".join(lines)
-
-
-def read_table_uploader(label: str, key: str) -> Optional[pd.DataFrame]:
-    """Uploader genérico: lee CSV o XLSX usando openpyxl si aplica."""
-    file = st.file_uploader(label, type=["csv", "xlsx"], key=key)
-    if not file:
-        return None
-
-    name = file.name.lower()
-    try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(file)
-            return df
-        elif name.endswith(".xlsx"):
-            # Intento de elegir hoja si hay varias
-            try:
-                file.seek(0)
-                xls = pd.ExcelFile(file, engine="openpyxl")
-                sheet = st.selectbox(
-                    "Hoja de Excel", xls.sheet_names,
-                    help="Selecciona la hoja que contiene tus datos"
-                )
-                df = xls.parse(sheet)
-                return df
-            except Exception as e:
-                error_help("No se pudo leer el Excel. Asegúrate de que el archivo no esté protegido y que sea .xlsx válido.")
-                st.exception(e)
-                return None
-        else:
-            warn_help("Formato no reconocido. Sube un CSV o XLSX.")
-            return None
-    except Exception:
-        error_help(
-            "No se pudo procesar el archivo. Si es Excel, verifica que el entorno tenga 'openpyxl' instalado. "
-            "Si es CSV, revisa el separador y el encoding."
-        )
-        return None
-
-
-def column_picker(df: pd.DataFrame, label: str, options_hint: List[str], optional=False) -> Optional[str]:
-    """Selector de columna con ayuda y búsqueda por nombre aproximado."""
-    if df is None or df.empty:
-        return None
-    cols = list(df.columns)
-    default = None
-    # Heurística simple: intenta preseleccionar por nombres sugeridos
-    for h in options_hint:
-        for c in cols:
-            if h.lower() == str(c).lower():
-                default = c
-                break
-        if default is not None:
-            break
-    idx = cols.index(default) if default in cols else 0
-    selected = st.selectbox(label, cols, index=idx if cols else 0)
-    if not selected and not optional:
-        warn_help(f"Selecciona una columna para '{label}'.")
-    return selected
-
-
-def hours_slider(label: str, default_h: str) -> time:
-    """Selector de hora 'HH:MM'."""
-    hh, mm = map(int, default_h.split(":"))
-    return time(hh, mm)
-
-
-def validate_required_columns(df: pd.DataFrame, required: List[str]) -> bool:
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        error_help(f"Faltan columnas requeridas: {missing}")
-        return False
-    return True
-
-
-def score_from_pct(pct: float) -> int:
-    """Convierte un % a un score 0–100 simple (más % => más riesgo)."""
-    pct = 0 if np.isnan(pct) else pct
-    return int(np.clip(round(pct), 0, 100))
-
-
-def score_from_count(n: int, scale: int = 100) -> int:
-    """Score aproximado por cantidad (recortado a 0–100)."""
-    return int(np.clip(round(100 * (n / max(scale, 1))), 0, 100))
-
-
-# ======================
-# MÓDULO 1 – CAAT: HORARIO
-# ======================
-st.header("⏰ Módulo 1: Registros fuera de horario (CAAT 1)")
-
-with st.expander("¿Cómo usar este módulo?", expanded=show_help):
-    st.markdown(
-        """
-**Objetivo:** detectar registros realizados **fuera del horario laboral** que definas.
-1. Sube tu archivo (CSV/XLSX).
-2. Elige **Usuario** y **Fecha/Hora** (opcional **Acción/Severidad**).
-3. Define el **horario** y marca **Solo días hábiles (L–V)** si aplica.
-4. Revisa hallazgos, métricas y descarga el **CSV**.
-        """
-    )
-
-df1 = read_table_uploader("Log de actividades (CSV/XLSX)", key="caat1_upl")
-if df1 is not None and not df1.empty:
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        col_user = column_picker(df1, "Columna Usuario", ["usuario", "user", "empleado"])
-    with c2:
-        col_dt = column_picker(df1, "Columna Fecha/Hora", ["timestamp", "fecha_registro", "fecha", "datetime"])
-    with c3:
-        col_action = column_picker(df1, "Columna Acción (opcional)", ["accion", "acción", "severidad", "nivel"], optional=True)
-
-    c4, c5, c6 = st.columns([1,1,1])
-    with c4:
-        start_h = st.selectbox("Inicio jornada", [f"{h:02d}:{m:02d}" for h in range(0,24) for m in (0,15,30,45)], index=32)
-    with c5:
-        end_h   = st.selectbox("Fin jornada", [f"{h:02d}:{m:02d}" for h in range(0,24) for m in (0,15,30,45)], index=72)
-    with c6:
-        only_weekdays = st.checkbox("Solo días hábiles (L–V)", value=True)
+# =====================================================
+# CAAT 1 – Registros fuera de horario
+# =====================================================
+def module_caat1(df: pd.DataFrame, mapping: dict):
+    st.subheader("CAAT 1 – Validación de registros fuera de horario")
 
     # Validaciones
-    valid = True
-    if col_user not in df1.columns or col_dt not in df1.columns:
-        error_help("Selecciona correctamente **Usuario** y **Fecha/Hora**.")
-        valid = False
+    user_col = mapping.get("usuario") or suggest_col(df, ["usuario"])
+    dt_col   = mapping.get("fecha") or suggest_col(df, ["fecha"])
+    action_col = mapping.get("accion") or None
 
-    work = df1.copy()
-    if valid:
-        work["user"] = work[col_user].astype(str)
-        work["dt"] = ensure_datetime(work[col_dt])
-        if work["dt"].isna().all():
-            error_help("La columna seleccionada para **Fecha/Hora** no tiene fechas válidas. Elige otra columna.")
-            valid = False
+    if not user_col or not dt_col:
+        st.error(f"{ERR} Se requieren al menos las columnas de **usuario** y **fecha/hora**.")
+        st.info("Usa el mapeo manual si la autodetección no acierta.")
+        return
 
-    if valid:
-        work["hour"] = work["dt"].dt.hour + work["dt"].dt.minute / 60.0
-        work["weekday"] = work["dt"].dt.weekday  # 0=Lunes ... 6=Domingo
-        start_hh, start_mm = map(int, start_h.split(":"))
-        end_hh, end_mm     = map(int, end_h.split(":"))
-        start_dec = start_hh + start_mm/60.0
-        end_dec   = end_hh + end_mm/60.0
+    # Parámetros
+    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    start_h = c1.selectbox("Inicio jornada", [f"{h:02d}:{m:02d}" for h in range(0,24) for m in (0,15,30,45)], index=32)
+    end_h   = c2.selectbox("Fin jornada",    [f"{h:02d}:{m:02d}" for h in range(0,24) for m in (0,15,30,45)], index=72)
+    only_workdays = c3.checkbox("Solo días hábiles (L–V)", value=True)
+    top_n = c4.slider("Top N reincidentes", 5, 100, 20)
 
-        if start_dec <= end_dec:
-            in_schedule = (work["hour"] >= start_dec) & (work["hour"] <= end_dec)
-        else:
-            # Jornada nocturna cruzando medianoche
-            in_schedule = (work["hour"] >= start_dec) | (work["hour"] <= end_dec)
+    # Preparación
+    work = df[[user_col, dt_col] + ([action_col] if action_col in df.columns else [])].copy()
+    work["dt"] = ensure_datetime(work[dt_col])
+    work = work.dropna(subset=["dt"])
+    work["hour"] = work["dt"].dt.hour + work["dt"].dt.minute/60
+    work["weekday"] = work["dt"].dt.weekday  # 0=Lunes
 
-        if only_weekdays:
-            in_schedule = in_schedule & (work["weekday"] <= 4)
+    sh = int(start_h.split(":")[0]) + int(start_h.split(":")[1])/60
+    eh = int(end_h.split(":")[0]) + int(end_h.split(":")[1])/60
 
-        work["fuera_horario"] = ~in_schedule
-        if col_action in work.columns:
-            work["accion"] = work[col_action].astype(str)
-        else:
-            work["accion"] = ""
+    in_schedule = (work["hour"] >= sh) & (work["hour"] <= eh)
+    if only_workdays:
+        in_schedule = in_schedule & (work["weekday"] < 5)
 
-        hall = work.loc[work["fuera_horario"], ["user","dt","weekday","accion","fuera_horario"]].copy()
-        hall["fecha"] = hall["dt"].dt.date.astype(str)
-        hall["hora"]  = hall["dt"].dt.time.astype(str)
-        hall = hall.drop(columns=["dt"])
+    work["fuera_horario"] = ~in_schedule
 
-        total = len(work)
-        fuera = len(hall)
-        pct = 100.0 * fuera / total if total else 0.0
+    total = len(work)
+    fuera = work["fuera_horario"].sum()
+    pct = 0 if total == 0 else (fuera/total)*100
 
-        cA, cB, cC = st.columns(3)
-        cA.metric("Eventos totales", f"{total:,}")
-        cB.metric("Fuera de horario", f"{fuera:,}")
-        cC.metric("% fuera de horario", f"{pct:.2f}%")
+    st.metric("Eventos totales", f"{total}")
+    st.metric("Fuera de horario", f"{fuera}")
+    st.metric("% fuera de horario", f"{pct:.2f}%")
 
-        # Score y metadatos para resumen final
-        st.session_state.metrics["CAAT1"] = {
-            "score": score_from_pct(pct),
-            "desc": "(más alto => más riesgo)",
-            "extra": f"Fuera de horario: {fuera}/{total} ({pct:.2f}%)."
-        }
+    hall = work[work["fuera_horario"]].copy()
+    if not hall.empty:
+        st.write("### Hallazgos")
+        st.dataframe(hall.head(500), use_container_width=True)
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇️ Descargar CSV (hallazgos)", df_to_csv_bytes(hall), "CAAT1_hallazgos.csv", mime="text/csv")
+        c2.download_button("⬇️ Descargar Excel (hallazgos)", df_to_excel_bytes(hall), "CAAT1_hallazgos.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        st.info("No se detectaron eventos fuera de horario con los parámetros seleccionados.")
 
-        st.subheader("Hallazgos")
-        st.dataframe(hall, use_container_width=True, height=300)
+# =====================================================
+# CAAT 2 – Privilegios (roles críticos) y SoD
+# =====================================================
+def module_caat2(df: pd.DataFrame, mapping: dict):
+    st.subheader("CAAT 2 – Auditoría de privilegios (roles críticos y SoD)")
 
-        # Descarga
-        fname = f"reporte_caat1_{datetime.now():%Y%m%d_%H%M}.csv"
-        st.download_button("⬇️ Descargar hallazgos (CSV)", data=df_to_csv_bytes(hall), file_name=fname, mime="text/csv")
-        add_report("CAAT1_Fuera_Horario", hall, fname)
+    user_col = mapping.get("usuario") or suggest_col(df, ["usuario"])
+    role_col = mapping.get("rol")     or suggest_col(df, ["rol"])
+    crit_col = mapping.get("critico") or suggest_col(df, ["critico"])
 
-st.divider()
+    if not user_col or not role_col:
+        st.error(f"{ERR} Se requieren al menos las columnas de **usuario** y **rol**.")
+        return
 
-
-# ==========================
-# MÓDULO 2 – CAAT: PRIVILEGIOS
-# ==========================
-st.header("🛡️ Módulo 2: Auditoría de privilegios (roles críticos y SoD) (CAAT 2)")
-
-with st.expander("¿Cómo usar este módulo?", expanded=show_help):
-    st.markdown(
-        """
-**Objetivo:** identificar **roles críticos** y violaciones de **Segregación de Funciones (SoD)**.
-1. Sube tu maestro de **Usuarios/Roles**.
-2. Elige **Usuario** y **Rol**.
-3. Define **roles críticos** (lista) o marca si tienes una columna de crítico.
-4. Escribe **reglas SoD** (una por línea) en formato `ROL_A -> ROL_B`.
-        """
+    c1, c2 = st.columns([2,1])
+    crit_list_txt = c1.text_input(
+        "Lista de roles críticos (separados por coma, opcional)",
+        placeholder="ADMIN, SUPERUSER, APROBADOR, TESORERIA"
+    )
+    sod_rules_txt = c2.text_area(
+        "Reglas SoD (una por línea, formato ROL_A -> ROL_B)",
+        placeholder="REGISTRO_PROVEEDOR -> APROBACION_PAGO"
     )
 
-df2 = read_table_uploader("Usuarios/Roles (CSV/XLSX)", key="caat2_upl")
-if df2 is not None and not df2.empty:
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        col_user2 = column_picker(df2, "Columna Usuario", ["usuario","user","empleado"])
-    with c2:
-        col_role2 = column_picker(df2, "Columna Rol", ["rol","role","perfil"])
-    with c3:
-        col_crit2 = column_picker(df2, "Columna es_crítico (opcional)", ["critico","crítico","es_critico","is_critical"], optional=True)
+    base = df[[user_col, role_col] + ([crit_col] if crit_col in df.columns else [])].copy()
+    base.columns = ["user", "role"] + (["crit_src"] if crit_col in df.columns else [])
+    base["user"] = base["user"].astype(str).str.strip()
+    base["role"] = base["role"].astype(str).str.strip()
 
-    roles_crit_txt = st.text_input("Lista de roles críticos (separados por coma)", value="ADMIN, SUPERUSER")
-    sod_rules_txt  = st.text_area("Reglas SoD (una por línea, formato ROL_A -> ROL_B)", height=100,
-                                  value="CREAR_PROVEEDOR -> APROBAR_PAGO")
-    # Normaliza
-    if col_user2 not in df2.columns or col_role2 not in df2.columns:
-        error_help("Selecciona correctamente **Usuario** y **Rol**.")
+    # Marcar críticos
+    base["is_critical"] = False
+    if "crit_src" in base.columns:
+        base["is_critical"] = map_to_bool(base["crit_src"])
+        base["is_critical"] = base["is_critical"].fillna(False)
+
+    if crit_list_txt.strip():
+        cl = [c.strip().lower() for c in crit_list_txt.split(",") if c.strip()]
+        base["is_critical"] |= base["role"].str.lower().isin(cl)
+
+    crits = base[base["is_critical"]].copy()
+    st.metric("Usuarios únicos", base["user"].nunique())
+    st.metric("Roles distintos", base["role"].nunique())
+    st.metric("Asignaciones críticas", len(crits))
+
+    if not crits.empty:
+        st.write("### Roles críticos detectados")
+        st.dataframe(crits.head(500), use_container_width=True)
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇️ CSV (críticos)", df_to_csv_bytes(crits), "CAAT2_criticos.csv", mime="text/csv")
+        c2.download_button("⬇️ Excel (críticos)", df_to_excel_bytes(crits), "CAAT2_criticos.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
-        base = df2.copy()
-        base["user"] = base[col_user2].astype(str)
-        base["role"] = base[col_role2].astype(str)
+        st.info("No se encontraron asignaciones críticas con los criterios actuales.")
 
-        # Críticos
-        crit_set = set([r.strip().lower() for r in roles_crit_txt.split(",") if r.strip()]) if roles_crit_txt else set()
-        if col_crit2 in base.columns:
-            base["is_crit"] = base[col_crit2].astype(str).str.lower().isin(["1","true","si","sí","y","yes"])
-        else:
-            base["is_crit"] = base["role"].str.lower().isin(crit_set)
-
-        crit_df = base.loc[base["is_crit"], ["user","role"]].groupby("user")["role"].agg(lambda x: "; ".join(sorted(set(x)))).reset_index()
-        crit_df.rename(columns={"role":"roles_criticos"}, inplace=True)
-
-        # SoD
+    # Reglas SoD
+    if sod_rules_txt.strip():
         rules = []
         for line in sod_rules_txt.splitlines():
             if "->" in line:
-                a,b = line.split("->",1)
-                a,b = a.strip(), b.strip()
+                a, b = line.split("->", 1)
+                a = a.strip()
+                b = b.strip()
                 if a and b:
-                    rules.append((a,b))
-        if not rules and show_help:
-            warn_help("No se detectaron reglas SoD válidas. Usa el formato `ROL_A -> ROL_B`.")
-
-        # Roles por usuario
-        roles_user = base.groupby("user")["role"].agg(set).reset_index()
-
-        def user_has_rule(rset: set, a: str, b: str) -> bool:
-            return a in rset and b in rset
-
-        sod_rows = []
-        for _, row in roles_user.iterrows():
-            u, rset = row["user"], row["role"]
-            for a,b in rules:
-                if user_has_rule(rset, a, b) or user_has_rule(rset, b, a):
-                    sod_rows.append(
-                        {
-                            "usuario": u,
-                            "violacion": f"{a} + {b}",
-                            "roles_usuario": "; ".join(sorted(rset)),
-                            "detalle": "Combinación incompatible según regla SoD definida"
-                        }
-                    )
-        sod_df = pd.DataFrame(sod_rows)
-
-        # Métricas
-        n_crit = len(crit_df)
-        n_sod  = len(sod_df)
-        cA, cB = st.columns(2)
-        cA.metric("Usuarios con roles críticos", f"{n_crit:,}")
-        cB.metric("Violaciones SoD", f"{n_sod:,}")
-
-        st.session_state.metrics["CAAT2"] = {
-            "score": score_from_count(n_crit + n_sod, scale=max(len(roles_user),1)*2),
-            "desc": "(más alto => más riesgo)",
-            "extra": f"Críticos={n_crit}, SoD={n_sod}"
-        }
-
-        st.subheader("Usuarios con roles críticos")
-        st.dataframe(crit_df, use_container_width=True, height=230)
-        f1 = f"reporte_caat2_criticos_{datetime.now():%Y%m%d_%H%M}.csv"
-        st.download_button("⬇️ Descargar críticos (CSV)", df_to_csv_bytes(crit_df), f1, "text/csv")
-        add_report("CAAT2_Criticos", crit_df, f1)
-
-        st.subheader("Violaciones SoD")
-        st.dataframe(sod_df, use_container_width=True, height=230)
-        f2 = f"reporte_caat2_sod_{datetime.now():%Y%m%d_%H%M}.csv"
-        st.download_button("⬇️ Descargar SoD (CSV)", df_to_csv_bytes(sod_df), f2, "text/csv")
-        add_report("CAAT2_SoD", sod_df, f2)
-
-st.divider()
-
-
-# ===================================
-# MÓDULO 3 – CAAT: CONCILIACIÓN LOGS/TX
-# ===================================
-st.header("🔗 Módulo 3: Conciliación de logs vs transacciones (CAAT 3)")
-
-with st.expander("¿Cómo usar este módulo?", expanded=show_help):
-    st.markdown(
-        """
-**Objetivo:** conciliar **logs** del sistema vs **transacciones**, buscar **IDs faltantes** y **desfases de tiempo**.
-1. Sube **Logs** y **Transacciones**.
-2. En ambos: elige **ID** y **Fecha/Hora**.
-3. Define la **tolerancia** (minutos) para marcar desface.
-        """
-    )
-
-c1, c2 = st.columns(2)
-with c1:
-    df3_logs = read_table_uploader("📄 Logs (CSV/XLSX)", key="caat3_logs")
-with c2:
-    df3_tx   = read_table_uploader("💰 Transacciones (CSV/XLSX)", key="caat3_tx")
-
-if df3_logs is not None and not df3_logs.empty and df3_tx is not None and not df3_tx.empty:
-    c1, c2 = st.columns(2)
-    with c1:
-        id_logs = column_picker(df3_logs, "ID (logs)", ["id","id_registro","cod"])
-        dt_logs = column_picker(df3_logs, "Fecha/Hora (logs)", ["timestamp","fecha","datetime","fecha_registro"])
-    with c2:
-        id_tx = column_picker(df3_tx, "ID (tx)", ["id","id_registro","cod"])
-        dt_tx = column_picker(df3_tx, "Fecha/Hora (tx)", ["timestamp","fecha","datetime","fecha_registro"])
-
-    tol_min = st.slider("Tolerancia de desfase (minutos)", 0, 240, 60)
-
-    # Validaciones mínimas
-    ok = True
-    for df, idc, dtc, tag in [(df3_logs, id_logs, dt_logs, "logs"), (df3_tx, id_tx, dt_tx, "tx")]:
-        if idc not in df.columns or dtc not in df.columns:
-            error_help(f"Selecciona correctamente ID y Fecha/Hora para {tag}.")
-            ok = False
-
-    if ok:
-        L = df3_logs.copy()
-        T = df3_tx.copy()
-        L["id"] = L[id_logs].astype(str)
-        L["dt"] = ensure_datetime(L[dt_logs])
-        T["id"] = T[id_tx].astype(str)
-        T["dt"] = ensure_datetime(T[dt_tx])
-
-        L = L[~L["dt"].isna()]
-        T = T[~T["dt"].isna()]
-
-        ids_logs = set(L["id"].unique())
-        ids_tx   = set(T["id"].unique())
-
-        only_logs = sorted(list(ids_logs - ids_tx))
-        only_tx   = sorted(list(ids_tx - ids_logs))
-
-        df_only_logs = pd.DataFrame({"id": only_logs, "detalle": "ID en logs sin transacción asociada"})
-        df_only_tx   = pd.DataFrame({"id": only_tx,   "detalle": "ID en transacción sin log asociado"})
-
-        # Para desfases: emparejamos por ID (primer match por sencillez)
-        M = pd.merge(L[["id","dt"]], T[["id","dt"]], on="id", suffixes=("_log","_tx"))
-        M["delay_sec"] = (M["dt_tx"] - M["dt_log"]).dt.total_seconds().astype(float)
-        M["fuera_tolerancia"] = np.abs(M["delay_sec"]) > tol_min*60
-        df_desf = M.loc[M["fuera_tolerancia"], :].copy()
-
-        cA, cB, cC = st.columns(3)
-        cA.metric("IDs solo en logs", f"{len(df_only_logs):,}")
-        cB.metric("IDs solo en tx", f"{len(df_only_tx):,}")
-        cC.metric("Desfaces > tolerancia", f"{len(df_desf):,}")
-
-        st.session_state.metrics["CAAT3"] = {
-            "score": score_from_count(len(df_only_logs) + len(df_only_tx) + len(df_desf), scale=max(len(M),1)),
-            "desc": "(más alto => más riesgo)",
-            "extra": f"SoloLogs={len(df_only_logs)}, SoloTx={len(df_only_tx)}, Desfaces={len(df_desf)}"
-        }
-
-        colA, colB = st.columns(2)
-        with colA:
-            st.subheader("Solo en logs")
-            st.dataframe(df_only_logs, use_container_width=True, height=220)
-            f1 = f"reporte_caat3_solo_logs_{datetime.now():%Y%m%d_%H%M}.csv"
-            st.download_button("⬇️ Descargar (CSV)", df_to_csv_bytes(df_only_logs), f1, "text/csv")
-            add_report("CAAT3_SoloLogs", df_only_logs, f1)
-
-        with colB:
-            st.subheader("Solo en transacciones")
-            st.dataframe(df_only_tx, use_container_width=True, height=220)
-            f2 = f"reporte_caat3_solo_tx_{datetime.now():%Y%m%d_%H%M}.csv"
-            st.download_button("⬇️ Descargar (CSV)", df_to_csv_bytes(df_only_tx), f2, "text/csv")
-            add_report("CAAT3_SoloTx", df_only_tx, f2)
-
-        st.subheader("Desfases fuera de tolerancia")
-        # Agrega columnas legibles
-        if not df_desf.empty:
-            df_desf["fecha_log"] = df_desf["dt_log"].dt.date.astype(str)
-            df_desf["hora_log"]  = df_desf["dt_log"].dt.time.astype(str)
-            df_desf["fecha_tx"]  = df_desf["dt_tx"].dt.date.astype(str)
-            df_desf["hora_tx"]   = df_desf["dt_tx"].dt.time.astype(str)
-        st.dataframe(df_desf[["id","fecha_log","hora_log","fecha_tx","hora_tx","delay_sec","fuera_tolerancia"]],
-                     use_container_width=True, height=240)
-        f3 = f"reporte_caat3_desfaces_{datetime.now():%Y%m%d_%H%M}.csv"
-        st.download_button("⬇️ Descargar desfases (CSV)", df_to_csv_bytes(df_desf), f3, "text/csv")
-        add_report("CAAT3_Desfases", df_desf, f3)
-
-st.divider()
-
-
-# ======================================
-# MÓDULO 4 – CAAT: VARIACIÓN INUSUAL PAGO
-# ======================================
-st.header("📈 Módulo 4: Variación inusual de pagos – outliers (CAAT 4)")
-
-with st.expander("¿Cómo usar este módulo?", expanded=show_help):
-    st.markdown(
-        """
-**Objetivo:** detectar **meses atípicos** por proveedor usando z-score robusto (mediana y MAD).
-1. Sube tu histórico de **Pagos**.
-2. Elige **Proveedor**, **Fecha** y **Monto**.
-3. Ajusta el **umbral |z|** (típico 3.0–3.5).
-        """
-    )
-
-df4 = read_table_uploader("Histórico de pagos (CSV/XLSX)", key="caat4_upl")
-if df4 is not None and not df4.empty:
-    c1, c2, c3 = st.columns([1,1,1])
-    with c1:
-        col_prov = column_picker(df4, "Proveedor", ["proveedor","vendor","nombre"])
-    with c2:
-        col_date = column_picker(df4, "Fecha", ["fecha","fecha_pago","date","timestamp"])
-    with c3:
-        col_amt  = column_picker(df4, "Monto", ["monto","importe","amount","valor"])
-
-    thr = st.slider("Ajusta el umbral de outliers (|z| robusto)", 2.0, 6.0, 3.5, 0.1)
-
-    ok = True
-    for c in [col_prov, col_date, col_amt]:
-        if c not in df4.columns:
-            ok = False
-    if not ok:
-        error_help("Selecciona correctamente Proveedor, Fecha y Monto.")
-    else:
-        P = df4.copy()
-        P["proveedor"] = P[col_prov].astype(str)
-        P["dt"] = ensure_datetime(P[col_date])
-        P[col_amt] = pd.to_numeric(P[col_amt], errors="coerce")
-
-        P = P[~P["dt"].isna()]
-        P = P[~P[col_amt].isna()]
-        if P.empty:
-            error_help("No hay registros válidos con fecha y monto numérico.")
+                    rules.append((a, b))
+        if rules:
+            violaciones = []
+            # conjunto de roles por usuario
+            roles_user = base.groupby("user")["role"].apply(set).reset_index()
+            for _, row in roles_user.iterrows():
+                user = row["user"]
+                rs = {r.strip().lower() for r in row["role"]}
+                for a, b in rules:
+                    if a.lower() in rs and b.lower() in rs:
+                        violaciones.append({"user": user, "rule": f"{a} -> {b}"})
+            sod_df = pd.DataFrame(violaciones)
+            st.metric("Violaciones SoD", len(sod_df))
+            if not sod_df.empty:
+                st.write("### Violaciones SoD")
+                st.dataframe(sod_df.head(500), use_container_width=True)
+                c1, c2 = st.columns(2)
+                c1.download_button("⬇️ CSV (SoD)", df_to_csv_bytes(sod_df), "CAAT2_sod.csv", mime="text/csv")
+                c2.download_button("⬇️ Excel (SoD)", df_to_excel_bytes(sod_df), "CAAT2_sod.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            P["year_month"] = P["dt"].dt.to_period("M").astype(str)
-            g = P.groupby(["proveedor","year_month"], as_index=False)[col_amt].sum()
-            g.rename(columns={col_amt: "monto"}, inplace=True)
+            st.warning(f"{WARN} No se detectaron reglas válidas en el textarea (usa formato ROL_A -> ROL_B).")
 
-            out_rows = []
-            for prov, sub in g.groupby("proveedor"):
-                z = robust_zscore(sub["monto"].values)
-                sub = sub.copy()
-                sub["zscore"] = z
-                sub["is_outlier"] = np.abs(z) >= thr
-                out_rows.append(sub)
-            OUT = pd.concat(out_rows, ignore_index=True) if out_rows else pd.DataFrame()
+# =====================================================
+# CAAT 3 – Conciliación de logs vs transacciones
+# =====================================================
+def simple_time_match(logs: pd.DataFrame, tx: pd.DataFrame, id_col_logs, id_col_tx, dt_col_logs, dt_col_tx, tol_minutes=5):
+    """Conciliación por ID exacto y diferencia de tiempo dentro de tolerancia."""
+    logs = logs.copy()
+    tx   = tx.copy()
+    logs["dt"] = ensure_datetime(logs[dt_col_logs])
+    tx["dt"]   = ensure_datetime(tx[dt_col_tx])
+    logs = logs.dropna(subset=["dt"])
+    tx   = tx.dropna(subset=["dt"])
 
-            anomalies = OUT.loc[OUT["is_outlier"]].copy()
-            n_anom = len(anomalies)
-            pct_anom_monto = 100.0 * anomalies["monto"].sum() / OUT["monto"].sum() if len(OUT) else 0.0
+    # Un merge por ID y luego filtrar por delta
+    merged = logs.merge(tx, left_on=id_col_logs, right_on=id_col_tx, how="left", suffixes=("_log", "_tx"))
+    merged["dt_diff_min"] = np.abs((merged["dt_log"] - merged["dt_tx"]).dt.total_seconds())/60
+    matched = merged[merged["dt_diff_min"] <= tol_minutes].copy()
+    unmatched_logs = merged[merged["dt_tx"].isna()].copy()
 
-            cA, cB = st.columns(2)
-            cA.metric("Anomalías detectadas", f"{n_anom:,}")
-            cB.metric("% monto anómalo", f"{pct_anom_monto:.2f}%")
+    return matched, unmatched_logs
 
-            st.session_state.metrics["CAAT4"] = {
-                "score": score_from_count(n_anom, scale=max(len(OUT),1)),
-                "desc": "(más alto => más riesgo)",
-                "extra": f"Umbral |z|={thr}."
-            }
+def module_caat3():
+    st.subheader("CAAT 3 – Conciliación de logs vs transacciones")
 
-            st.subheader("Meses atípicos por proveedor")
-            st.dataframe(anomalies, use_container_width=True, height=260)
-            f1 = f"reporte_caat4_outliers_{datetime.now():%Y%m%d_%H%M}.csv"
-            st.download_button("⬇️ Descargar outliers (CSV)", df_to_csv_bytes(anomalies), f1, "text/csv")
-            add_report("CAAT4_Outliers", anomalies, f1)
+    st.caption("Sube **dos** archivos: uno de Logs y otro de Transacciones. "
+               "Si cada archivo tiene varias hojas, elige la correspondiente. "
+               "Se concilia por **ID** y **Fecha/Hora** con una tolerancia en minutos.")
 
-st.divider()
+    st.write("#### Logs (CSV/XLSX)")
+    logs_list, logs_names = read_table_uploader(
+        "Drag and drop file here",
+        key_prefix="caat3_logs",
+        help_txt="Sube el archivo de LOGS (CSV o XLSX).",
+        accept_multiple=False
+    )
+    st.write("#### Transacciones (CSV/XLSX)")
+    tx_list, tx_names = read_table_uploader(
+        "Drag and drop file here",
+        key_prefix="caat3_tx",
+        help_txt="Sube el archivo de TRANSACCIONES (CSV o XLSX).",
+        accept_multiple=False
+    )
 
+    if not logs_list or not tx_list:
+        st.info("Sube ambos archivos para continuar.")
+        return
 
-# =========================================
-# MÓDULO 5 – CAAT: CRITERIOS DE PROVEEDORES
-# =========================================
-st.header("✅ Módulo 5: Criterios de selección de proveedores (CAAT 5)")
+    logs = logs_list[0]
+    tx   = tx_list[0]
 
-with st.expander("¿Cómo usar este módulo?", expanded=show_help):
+    # Mapeo sugerido
+    id_col_logs = suggest_col(logs, ["id"]) or st.selectbox("ID en Logs", logs.columns, key="caat3_id_logs_fallback")
+    id_col_tx   = suggest_col(tx, ["id"])   or st.selectbox("ID en Transacciones", tx.columns, key="caat3_id_tx_fallback")
+    dt_col_logs = suggest_col(logs, ["fecha"]) or st.selectbox("Fecha/Hora en Logs", logs.columns, key="caat3_dt_logs_fb")
+    dt_col_tx   = suggest_col(tx, ["fecha"])   or st.selectbox("Fecha/Hora en Transacciones", tx.columns, key="caat3_dt_tx_fb")
+
+    c1, _ = st.columns([1,3])
+    tol = c1.slider("Tolerancia (minutos)", 0, 120, 5)
+
+    # Validaciones
+    for name, col, df in [
+        ("ID Logs", id_col_logs, logs), ("ID Transacciones", id_col_tx, tx),
+        ("Fecha Logs", dt_col_logs, logs), ("Fecha Transacciones", dt_col_tx, tx)
+    ]:
+        if col not in df.columns:
+            st.error(f"{ERR} La columna **{name}** no existe en el archivo mapeado.")
+            return
+
+    matched, unmatched = simple_time_match(logs, tx, id_col_logs, id_col_tx, dt_col_logs, dt_col_tx, tol_minutes=tol)
+
+    st.metric("Coincidencias", len(matched))
+    st.metric("Logs sin match", len(unmatched))
+
+    if not matched.empty:
+        st.write("### Coincidencias")
+        st.dataframe(matched.head(500), use_container_width=True)
+        st.download_button("⬇️ CSV (coincidencias)", df_to_csv_bytes(matched), "CAAT3_coincidencias.csv", mime="text/csv")
+
+    if not unmatched.empty:
+        st.write("### Logs sin match")
+        st.dataframe(unmatched.head(500), use_container_width=True)
+        st.download_button("⬇️ CSV (sin_match)", df_to_csv_bytes(unmatched), "CAAT3_sin_match.csv", mime="text/csv")
+
+# =====================================================
+# CAAT 4 – Variación inusual de pagos (outliers)
+# =====================================================
+def module_caat4(df: pd.DataFrame, mapping: dict):
+    st.subheader("CAAT 4 – Variación inusual de pagos (outliers)")
+    prov_col  = mapping.get("proveedor") or suggest_col(df, ["proveedor"])
+    dt_col    = mapping.get("fecha") or suggest_col(df, ["fecha"])
+    monto_col = mapping.get("monto") or suggest_col(df, ["monto"])
+
+    if not prov_col or not dt_col or not monto_col:
+        st.error(f"{ERR} Se requieren **proveedor**, **fecha** y **monto**.")
+        return
+
+    c1, c2 = st.columns(2)
+    z_thr = c1.slider("Ajusta el umbral de outliers (|z| robusto)", 2.0, 6.0, 3.5, 0.5)
+    top_n = c2.slider("Top N por proveedor (para vista rápida)", 5, 100, 10)
+
+    pay = df[[prov_col, dt_col, monto_col]].copy()
+    pay["fecha"] = ensure_datetime(pay[dt_col])
+    pay["monto"] = num_from_any(pay[monto_col])
+    pay = pay.dropna(subset=["fecha", "monto"])
+
+    pay["z"] = robust_zscore(pay["monto"])
+    out = pay[np.abs(pay["z"]) >= float(z_thr)].copy()
+    st.metric("Registros", len(pay))
+    st.metric("Outliers detectados", len(out))
+
+    if not out.empty:
+        st.write("### Outliers detectados")
+        st.dataframe(out.head(500), use_container_width=True)
+        st.download_button("⬇️ CSV (outliers)", df_to_csv_bytes(out), "CAAT4_outliers.csv", mime="text/csv")
+    else:
+        st.info("No se detectaron outliers con el umbral actual.")
+
+# =====================================================
+# CAAT 5 – Top N de acciones / rarezas
+# =====================================================
+def module_caat5(df: pd.DataFrame, mapping: dict):
+    st.subheader("CAAT 5 – Frecuencias / rarezas")
+    user_col   = mapping.get("usuario") or suggest_col(df, ["usuario"])
+    action_col = mapping.get("accion")  or suggest_col(df, ["accion"])
+    dt_col     = mapping.get("fecha")   or suggest_col(df, ["fecha"])
+
+    if not user_col or not action_col:
+        st.error(f"{ERR} Se requieren **usuario** y **acción/evento**.")
+        return
+
+    c1, c2 = st.columns(2)
+    top_n = c1.slider("Top N", 5, 100, 20)
+    if dt_col and dt_col in df.columns:
+        # opcionalmente filtrar por rango de fechas
+        # aquí podríamos agregar un date_input, lo omitimos para simplicidad
+        pass
+
+    agg = df.groupby([user_col, action_col]).size().reset_index(name="conteo")
+    top = agg.sort_values("conteo", ascending=False).head(top_n).copy()
+
+    st.metric("Usuarios únicos", agg[user_col].nunique())
+    st.metric("Acciones distintas", agg[action_col].nunique())
+
+    st.write("### Top N combinaciones Usuario–Acción")
+    st.dataframe(top, use_container_width=True)
+    st.download_button("⬇️ CSV (Top N)", df_to_csv_bytes(top), "CAAT5_topN.csv", mime="text/csv")
+
+# =====================================================
+# Modo Libre – Archivo arbitrario
+# =====================================================
+def modo_libre():
+    st.subheader("📦 Modo Libre — Sube cualquier archivo")
+
     st.markdown(
         """
-**Objetivo:** verificar criterios mínimos (RUC válido, no en blacklist, documento vigente, cuenta validada, aprobado).
-1. Sube tu maestro de **Proveedores**.
-2. Elige columnas: **Proveedor**, **RUC** y las opcionales (Blacklist, Vigencia, Cuenta, Aprobado).
-3. Marca los **criterios** a verificar y revisa incumplimientos.
+**¿Qué hace esta sección?**  
+Aquí puedes subir **cualquier archivo** (CSV o Excel) y la app intentará **reconocer automáticamente**
+las columnas necesarias para ejecutar **cualquiera** de los módulos CAAT (1–5).  
+Si algo no coincide, te pediremos **mapear** manualmente. Luego podrás **correr el análisis** y
+**descargar un reporte** con los hallazgos.
+
+**Pasos:**
+1) Sube tu archivo (CSV/XLSX).  
+2) Elige el **módulo (CAAT)** que quieres probar.  
+3) Ajusta o confirma el **mapeo** de columnas sugerido.  
+4) Presiona **“Ejecutar análisis”** para ver métricas y **descargar** evidencias.
         """
     )
 
-df5 = read_table_uploader("Maestro de Proveedores (CSV/XLSX)", key="caat5_upl")
-if df5 is not None and not df5.empty:
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    with c1:
-        col_pv = column_picker(df5, "Proveedor", ["proveedor","nombre","vendor"])
-    with c2:
-        col_ruc = column_picker(df5, "RUC", ["ruc","tax_id","id_fiscal"])
-    with c3:
-        col_bl  = column_picker(df5, "Blacklist (opcional)", ["blacklist","en_lista_negra","bloqueado"], optional=True)
-    with c4:
-        col_vig = column_picker(df5, "Fecha vigencia doc (opcional)", ["vigencia","fecha_vigencia","expira"], optional=True)
-    with c5:
-        col_cta = column_picker(df5, "Cuenta validada (opcional)", ["cuenta_val","cuenta_validada","cuenta_ok"], optional=True)
-    with c6:
-        col_apr = column_picker(df5, "Aprobado (opcional)", ["aprobado","aprob","approved"], optional=True)
+    dfs, names = read_table_uploader(
+        "Sube tu archivo (CSV/XLSX)",
+        key_prefix="free_mode_file",
+        help_txt="Si tu Excel tiene varias hojas, elige la correcta.",
+        accept_multiple=False
+    )
+    if not dfs:
+        st.info("Sube un archivo para continuar.")
+        return
 
-    crit_ruc = st.checkbox("Verificar RUC válido (11-13 dígitos num.)", value=True)
-    crit_bl  = st.checkbox("No estar en Blacklist", value=True)
-    crit_vig = st.checkbox("Documento vigente (>= hoy)", value=True)
-    crit_cta = st.checkbox("Cuenta validada", value=False)
-    crit_apr = st.checkbox("Aprobado", value=False)
+    df = dfs[0]
+    st.write("**Vista rápida de columnas:**", ", ".join(list(df.columns)[:30]))
 
-    ok = True
-    if col_pv not in df5.columns or col_ruc not in df5.columns:
-        ok = False
-        error_help("Selecciona al menos Proveedor y RUC.")
-    if ok:
-        B = df5.copy()
-        B["proveedor"] = B[col_pv].astype(str)
-        B["ruc"] = B[col_ruc].astype(str)
+    caat_choice = st.selectbox(
+        "¿Qué módulo quieres ejecutar sobre este archivo?",
+        ["CAAT 1 – Fuera de horario", "CAAT 2 – Privilegios/SoD",
+         "CAAT 3 – Conciliación (requiere segundo archivo)", "CAAT 4 – Outliers pagos", "CAAT 5 – Top N / rarezas"],
+        index=0, key="free_mode_caat"
+    )
 
-        def ruc_valido(r: str) -> bool:
-            r = "".join([c for c in r if c.isdigit()])
-            return 11 <= len(r) <= 13
+    mapping = {}
+    # Armamos UI de mapeo según módulo
+    if "CAAT 1" in caat_choice:
+        c1, c2, c3 = st.columns(3)
+        mapping["usuario"] = c1.selectbox("Columna Usuario", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["usuario"])) if suggest_col(df, ["usuario"]) in df.columns else 0))
+        mapping["fecha"]   = c2.selectbox("Columna Fecha/Hora", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["fecha"])) if suggest_col(df, ["fecha"]) in df.columns else 0))
+        mapping["accion"]  = c3.selectbox("Columna Acción (opcional)", ["(ninguna)"] + df.columns.tolist())
+        if mapping["accion"] == "(ninguna)":
+            mapping["accion"] = None
+        if st.button("Ejecutar análisis", key="free_mode_run1"):
+            module_caat1(df, mapping)
 
-        incum_rows = []
-        today = pd.Timestamp.today().normalize()
+    elif "CAAT 2" in caat_choice:
+        c1, c2, c3 = st.columns(3)
+        mapping["usuario"] = c1.selectbox("Columna Usuario", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["usuario"])) if suggest_col(df, ["usuario"]) in df.columns else 0))
+        mapping["rol"]     = c2.selectbox("Columna Rol", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["rol"])) if suggest_col(df, ["rol"]) in df.columns else 0))
+        mapping["critico"] = c3.selectbox("Columna es_crítico (opcional)", ["(ninguna)"] + df.columns.tolist())
+        if mapping["critico"] == "(ninguna)":
+            mapping["critico"] = None
+        if st.button("Ejecutar análisis", key="free_mode_run2"):
+            module_caat2(df, mapping)
 
-        for _, row in B.iterrows():
-            fails = []
-            # RUC
-            if crit_ruc and not ruc_valido(row["ruc"]):
-                fails.append("RUC inválido")
-            # Blacklist
-            if crit_bl and col_bl in B.columns:
-                val = str(row[col_bl]).strip().lower()
-                if val in ["1","true","si","sí","y","yes","blacklist","bloqueado"]:
-                    fails.append("Proveedor en Blacklist")
-            # Vigencia
-            if crit_vig and col_vig in B.columns:
-                dt = pd.to_datetime(row[col_vig], errors="coerce")
-                if pd.isna(dt) or dt < today:
-                    fails.append("Documento no vigente")
-            # Cuenta
-            if crit_cta and col_cta in B.columns:
-                val = str(row[col_cta]).strip().lower()
-                if val not in ["1","true","si","sí","y","yes","ok","validada"]:
-                    fails.append("Cuenta no validada")
-            # Aprobado
-            if crit_apr and col_apr in B.columns:
-                val = str(row[col_apr]).strip().lower()
-                if val not in ["1","true","si","sí","y","yes","aprobado"]:
-                    fails.append("No aprobado")
+    elif "CAAT 3" in caat_choice:
+        st.info("Para CAAT 3 necesitas **un segundo archivo** (Transacciones) además del que ya subiste como Logs.")
+        tx_list, tx_names = read_table_uploader(
+            "Sube el archivo de Transacciones",
+            key_prefix="free_mode_caat3_tx",
+            accept_multiple=False
+        )
+        if not tx_list:
+            return
+        logs = df
+        tx   = tx_list[0]
 
-            if fails:
-                incum_rows.append({
-                    "proveedor": row["proveedor"],
-                    "ruc": row["ruc"],
-                    "criterios_incumplidos": "; ".join(fails),
-                    "detalle": "Incumplimientos detectados"
-                })
+        id_col_logs = suggest_col(logs, ["id"]) or st.selectbox("ID en Logs", logs.columns, key="free_id_logs_fb")
+        id_col_tx   = suggest_col(tx, ["id"])   or st.selectbox("ID en Transacciones", tx.columns, key="free_id_tx_fb")
+        dt_col_logs = suggest_col(logs, ["fecha"]) or st.selectbox("Fecha/Hora en Logs", logs.columns, key="free_dt_logs_fb")
+        dt_col_tx   = suggest_col(tx, ["fecha"])   or st.selectbox("Fecha/Hora en Transacciones", tx.columns, key="free_dt_tx_fb")
+        tol = st.slider("Tolerancia (minutos)", 0, 120, 5, key="free_tol")
+        if st.button("Ejecutar análisis", key="free_mode_run3"):
+            matched, unmatched = simple_time_match(logs, tx, id_col_logs, id_col_tx, dt_col_logs, dt_col_tx, tol_minutes=tol)
+            st.metric("Coincidencias", len(matched))
+            st.metric("Logs sin match", len(unmatched))
+            if not matched.empty:
+                st.dataframe(matched.head(500), use_container_width=True)
+                st.download_button("⬇️ CSV (coincidencias)", df_to_csv_bytes(matched), "CAAT3_coincidencias.csv", mime="text/csv")
+            if not unmatched.empty:
+                st.dataframe(unmatched.head(500), use_container_width=True)
+                st.download_button("⬇️ CSV (sin_match)", df_to_csv_bytes(unmatched), "CAAT3_sin_match.csv", mime="text/csv")
 
-        INC = pd.DataFrame(incum_rows)
-        n_inc = len(INC)
-        st.metric("Proveedores con incumplimientos", f"{n_inc:,}")
+    elif "CAAT 4" in caat_choice:
+        c1, c2, c3 = st.columns(3)
+        mapping["proveedor"] = c1.selectbox("Columna Proveedor", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["proveedor"])) if suggest_col(df, ["proveedor"]) in df.columns else 0))
+        mapping["fecha"]     = c2.selectbox("Columna Fecha", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["fecha"])) if suggest_col(df, ["fecha"]) in df.columns else 0))
+        mapping["monto"]     = c3.selectbox("Columna Monto", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["monto"])) if suggest_col(df, ["monto"]) in df.columns else 0))
+        if st.button("Ejecutar análisis", key="free_mode_run4"):
+            module_caat4(df, mapping)
 
-        st.session_state.metrics["CAAT5"] = {
-            "score": score_from_count(n_inc, scale=max(len(B),1)),
-            "desc": "(más alto => más riesgo)",
-            "extra": f"Incumplimientos={n_inc}"
-        }
+    else:  # CAAT 5
+        c1, c2, c3 = st.columns(3)
+        mapping["usuario"] = c1.selectbox("Columna Usuario", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["usuario"])) if suggest_col(df, ["usuario"]) in df.columns else 0))
+        mapping["accion"]  = c2.selectbox("Columna Acción/Evento", df.columns, index=(df.columns.tolist().index(suggest_col(df, ["accion"])) if suggest_col(df, ["accion"]) in df.columns else 0))
+        mapping["fecha"]   = c3.selectbox("Columna Fecha (opcional)", ["(ninguna)"] + df.columns.tolist())
+        if mapping["fecha"] == "(ninguna)":
+            mapping["fecha"] = None
+        if st.button("Ejecutar análisis", key="free_mode_run5"):
+            module_caat5(df, mapping)
 
-        st.subheader("Incumplimientos detectados")
-        st.dataframe(INC, use_container_width=True, height=260)
-        f1 = f"reporte_caat5_incumplimientos_{datetime.now():%Y%m%d_%H%M}.csv"
-        st.download_button("⬇️ Descargar (CSV)", df_to_csv_bytes(INC), f1, "text/csv")
-        add_report("CAAT5_Incumplimientos", INC, f1)
+# ============================
+# Página principal
+# ============================
+st.title(APP_TITLE)
+st.caption(APP_SUBTITLE)
 
-st.divider()
+tabs = st.tabs([
+    "🏠 Inicio",
+    "⏰ CAAT 1",
+    "🛡️ CAAT 2",
+    "🔗 CAAT 3",
+    "💸 CAAT 4",
+    "📊 CAAT 5",
+    "📦 Modo Libre"
+])
 
-
-# ===========================
-# REPORTE FINAL CONSOLIDADO
-# ===========================
-st.header("🧾 Reporte final consolidado")
-info_help(
-    "Este reporte reúne las descargas de todos los módulos ejecutados en esta sesión y agrega un **resumen ejecutivo**."
-)
-
-if st.session_state.reports:
-    zip_bytes = make_zip_reports()
-    file_zip = f"reporte_consolidado_caats_{datetime.now():%Y%m%d_%H%M}.zip"
-    st.download_button("⬇️ Descargar ZIP consolidado (CSV + Resumen)", data=zip_bytes, file_name=file_zip, mime="application/zip")
-else:
-    st.caption("Aún no hay reportes generados. Ejecuta algún módulo y descarga sus hallazgos para incluirlos aquí.")
-
-
-# ===========================
-# NOTAS FINALES / AYUDAS
-# ===========================
-with st.expander("Guía rápida de archivos aceptados", expanded=False):
+# ------------------
+# Tab: Inicio
+# ------------------
+with tabs[0]:
     st.markdown(
         """
-- **CSV**: delimitado por coma (encoding UTF-8 recomendado).
-- **Excel .xlsx**: requiere el paquete `openpyxl` (incluido en requirements).
-- Si tu Excel tiene varias hojas, **elige la hoja** en el selector que aparece al subirlo.
-- Si el módulo no muestra resultados, revisa:
-  - Columnas requeridas seleccionadas (Usuario, Fecha/Hora, etc.).
-  - Que la columna Fecha/Hora tenga **fechas válidas**.
-  - Que las columnas numéricas (ej. Monto) sean realmente numéricas.
+### Bienvenido/a
+Esta aplicación te permite **subir tus bases (CSV/XLSX)**, ajustar parámetros y **analizar en vivo** usando
+**CAAT 1–5**.  
+Activa la casilla de **Mostrar ayudas** cuando tengas dudas en los filtros.
+
+**Consejos para evitar errores:**
+- Si subes **Excel**, asegúrate de que no tenga contraseña, que esté cerrado en tu PC y que sea **.xlsx** válido.
+- Si aparece *“Falta openpyxl”*, instálalo o sube un **CSV**.
+- Si el error dice *“elementos duplicados”*, es porque dos selectbox eran iguales — ya lo evitamos con **keys únicos**.
+
+### ¿Qué hace cada módulo?
+- **CAAT 1:** Detecta eventos **fuera del horario** laboral.  
+- **CAAT 2:** Revisa **roles críticos** y **violaciones SoD**.  
+- **CAAT 3:** Concilia **Logs** vs **Transacciones** por **ID** y **Fecha** con tolerancia.  
+- **CAAT 4:** Busca **outliers** en pagos por proveedor con **z robusto**.  
+- **CAAT 5:** Muestra **Top N** de combinaciones Usuario–Acción (rareza / frecuencia).
+
+Si tienes un archivo con formato desconocido, usa **📦 Modo Libre**.
         """
     )
+
+# ------------------
+# Tab: CAAT 1
+# ------------------
+with tabs[1]:
+    st.markdown("#### Sube tu log de actividades (CSV/XLSX)")
+    lst, names = read_table_uploader(
+        "Drag and drop file here",
+        key_prefix="caat1",
+        help_txt="Sube tu base con columnas de usuario y fecha/hora.",
+        accept_multiple=False
+    )
+    if lst:
+        df = lst[0]
+        module_caat1(df, mapping={})
+    else:
+        st.info("Sube un archivo para comenzar.")
+
+# ------------------
+# Tab: CAAT 2
+# ------------------
+with tabs[2]:
+    st.markdown("#### Usuarios/Roles (CSV/XLSX)")
+    lst, names = read_table_uploader(
+        "Drag and drop file here",
+        key_prefix="caat2",
+        help_txt="Sube tu maestro de usuarios/roles.",
+        accept_multiple=False
+    )
+    if lst:
+        df = lst[0]
+        module_caat2(df, mapping={})
+    else:
+        st.info("Sube un archivo para comenzar.")
+
+# ------------------
+# Tab: CAAT 3
+# ------------------
+with tabs[3]:
+    module_caat3()
+
+# ------------------
+# Tab: CAAT 4
+# ------------------
+with tabs[4]:
+    st.markdown("#### Historial de pagos (CSV/XLSX)")
+    lst, names = read_table_uploader(
+        "Drag and drop file here",
+        key_prefix="caat4",
+        help_txt="Se requieren columnas de proveedor, fecha y monto.",
+        accept_multiple=False
+    )
+    if lst:
+        df = lst[0]
+        module_caat4(df, mapping={})
+    else:
+        st.info("Sube un archivo para comenzar.")
+
+# ------------------
+# Tab: CAAT 5
+# ------------------
+with tabs[5]:
+    st.markdown("#### Log / Eventos (CSV/XLSX)")
+    lst, names = read_table_uploader(
+        "Drag and drop file here",
+        key_prefix="caat5",
+        help_txt="Se requieren columnas de usuario y acción/evento.",
+        accept_multiple=False
+    )
+    if lst:
+        df = lst[0]
+        module_caat5(df, mapping={})
+    else:
+        st.info("Sube un archivo para comenzar.")
+
+# ------------------
+# Tab: Modo Libre
+# ------------------
+with tabs[6]:
+    modo_libre()
