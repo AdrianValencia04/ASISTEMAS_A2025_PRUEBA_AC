@@ -193,15 +193,17 @@ def module_caat1():
     with st.expander("¿Cómo usar este módulo?", expanded=False):
         st.markdown("""
 1. **Sube tu log** (CSV/XLSX).  
-2. **Usuario** y **Fecha/Hora** (sugerimos automáticamente).  
+2. Selecciona **Usuario** y **Fecha/Hora**.  
 3. Define **inicio/fin de jornada** y si deseas **solo días hábiles (L–V)**.  
-4. Revisa KPIs y descarga los **hallazgos**.
+4. (Opcional) Mapea **dispositivo** y **ubicación** para detectar inconsistencias.  
+5. Revisa KPIs y descarga los **hallazgos**.
 """)
 
     df = file_uploader_block("Log de actividades", key="caat1")
     if df is None:
         return
 
+    # --- Selección de columnas básicas ---
     c1, c2, c3 = st.columns(3)
     with c1:
         user_col = choose_column(
@@ -225,37 +227,87 @@ def module_caat1():
         if action_col == "(ninguna)":
             action_col = None
 
-    # Parámetros de horario
+    # --- Campos opcionales para inconsistencias (dispositivo / ubicación) ---
+    with st.expander("Campos opcionales para inconsistencias (si existen en tu archivo)", expanded=False):
+        cD1, cD2 = st.columns(2)
+        with cD1:
+            dev_assigned = st.selectbox(
+                "Dispositivo asignado",
+                ["(ninguna)"] + list(df.columns),
+                key="caat1_dev_assigned",
+                help="Ej.: dispositivo_asignado / equipo_asignado",
+            )
+        with cD2:
+            dev_used = st.selectbox(
+                "Dispositivo usado (log)",
+                ["(ninguna)"] + list(df.columns),
+                key="caat1_dev_used",
+                help="Ej.: dispositivo_usado / dispositivo",
+            )
+        cL1, cL2 = st.columns(2)
+        with cL1:
+            loc_assigned = st.selectbox(
+                "Ubicación asignada (o de trabajo)",
+                ["(ninguna)"] + list(df.columns),
+                key="caat1_loc_assigned",
+                help="Ej.: ubicacion_asignada / ubicacion_de_trabajo",
+            )
+        with cL2:
+            loc_log = st.selectbox(
+                "Ubicación del log",
+                ["(ninguna)"] + list(df.columns),
+                key="caat1_loc_log",
+                help="Ej.: ubicacion_log / ubicacion",
+            )
+
+    # --- Parámetros de horario ---
     c4, c5, c6, c7 = st.columns([1, 1, 1, 2])
     with c4:
         start_h = st.time_input("Inicio de jornada", time(8, 0), key="caat1_start")
     with c5:
-        end_h = st.time_input("Fin de jornada", time(18, 0), key="caat1_end")
+        end_h = st.time_input("Fin de jornada", time(17, 30), key="caat1_end")  # 17:30 como pediste
     with c6:
         only_weekdays = st.checkbox("Solo días hábiles (L–V)", value=True, key="caat1_week")
     with c7:
         topn = st.slider("Top N reincidentes", 5, 100, 20, key="caat1_topn")
 
-    # Procesamiento
-    work = df[[user_col, dt_col] + ([action_col] if action_col else [])].copy()
+    # --- Procesamiento base ---
+    base_cols = [user_col, dt_col] + ([action_col] if action_col else [])
+    work = df[base_cols].copy()
     work.rename(columns={user_col: "user", dt_col: "dt"}, inplace=True)
     work["dt"] = ensure_datetime(work["dt"])
     work = work.dropna(subset=["dt"])
     work["weekday"] = work["dt"].dt.weekday  # 0=Lunes
     work["hour"] = work["dt"].dt.hour + work["dt"].dt.minute / 60
 
-    # NUEVO: nombre del día y flags de laboral/fin de semana
+    # Nombre del día y flags L–V
     DIAS = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
     work["weekday_name"] = work["weekday"].map(DIAS)
     work["is_weekday"] = work["weekday"].between(0, 4)  # L–V
     work["is_weekend"] = ~work["is_weekday"]
 
+    # --- Añadir columnas opcionales (si el usuario las mapeó) ---
+    extra_cols = []
+    if dev_assigned != "(ninguna)" and dev_used != "(ninguna)":
+        work["dispositivo_asignado"] = df[dev_assigned].astype(str)
+        work["dispositivo_usado"] = df[dev_used].astype(str)
+        work["mismatch_dispositivo"] = work["dispositivo_asignado"].ne(work["dispositivo_usado"])
+        extra_cols += ["dispositivo_asignado", "dispositivo_usado", "mismatch_dispositivo"]
+
+    # Aceptar variantes: si el usuario trajo 'ubicacion_de_trabajo', puede mapearla aquí
+    if loc_assigned != "(ninguna)" and loc_log != "(ninguna)":
+        work["ubicacion_asignada"] = df[loc_assigned].astype(str)
+        work["ubicacion_log"] = df[loc_log].astype(str)
+        work["mismatch_ubicacion"] = work["ubicacion_asignada"].ne(work["ubicacion_log"])
+        extra_cols += ["ubicacion_asignada", "ubicacion_log", "mismatch_ubicacion"]
+
+    # --- Fuera de horario con tu rango 08:00–17:30 ---
     in_schedule = (work["hour"] >= (start_h.hour + start_h.minute/60)) & (work["hour"] <= (end_h.hour + end_h.minute/60))
     if only_weekdays:
         in_schedule &= work["is_weekday"]
-
     work["fuera_horario"] = ~in_schedule
 
+    # --- KPIs base ---
     total_events = len(work)
     out_of_hours = int(work["fuera_horario"].sum())
     pct = (out_of_hours / total_events * 100) if total_events else 0
@@ -265,6 +317,7 @@ def module_caat1():
     kcol2.metric("Fuera de horario", f"{out_of_hours:,}")
     kcol3.metric("% fuera de horario", f"{pct:.2f}%")
 
+    # --- Hallazgos: fuera de horario (como tenías) ---
     findings = work[work["fuera_horario"]].copy()
     if not findings.empty:
         # reincidentes
@@ -274,23 +327,22 @@ def module_caat1():
             .sort_values("size", ascending=False)
             .head(topn)
         )
-
         with st.expander("Top reincidentes", expanded=True):
             st.dataframe(top, use_container_width=True)
 
-        # ordenar columnas para reporte claro
-        cols_show = ["user", "dt", "weekday", "weekday_name"] + ([action_col] if action_col else [])
-        find_cols = cols_show + [c for c in findings.columns if c not in cols_show]
+        cols_show = ["user", "dt", "weekday", "weekday_name"] + ([action_col] if action_col else []) + extra_cols + ["fuera_horario"]
+        cols_show = [c for c in cols_show if c in findings.columns]
         with st.expander("Hallazgos (detallado)", expanded=False):
-            st.dataframe(findings[find_cols], use_container_width=True)
+            st.dataframe(findings[cols_show], use_container_width=True)
 
-        # DESCARGAS XLSX
+        # DESCARGA XLSX (fuera de horario)
         st.download_button(
-            "⬇️ Descargar hallazgos (XLSX)",
-            data=make_xlsx(findings[find_cols], sheet_name="Hallazgos"),
+            "⬇️ Descargar hallazgos fuera de horario (XLSX)",
+            data=make_xlsx(findings[cols_show], sheet_name="Hallazgos"),
             file_name="CAAT1_fuera_horario.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        # Top
         st.download_button(
             "⬇️ Descargar Top (XLSX)",
             data=make_xlsx(top, sheet_name="Top"),
@@ -299,6 +351,52 @@ def module_caat1():
         )
     else:
         st.info("No se detectaron registros fuera de horario con los parámetros actuales.")
+
+    # --- NUEVO: Reportes de inconsistencias de dispositivo/ubicación ---
+    st.markdown("---")
+    st.markdown("### 🔎 Inconsistencias de dispositivo / ubicación")
+
+    # Dispositivo no asignado
+    if "mismatch_dispositivo" in work.columns:
+        dev_bad = work[work["mismatch_dispositivo"]].copy()
+        k1, k2 = st.columns(2)
+        with k1:
+            st.metric("Registros con dispositivo distinto al asignado", f"{len(dev_bad):,}")
+        with k2:
+            st.metric("Usuarios únicos con mismatch de dispositivo", f"{dev_bad['user'].nunique():,}")
+        with st.expander("Detalle – Dispositivo no asignado", expanded=False):
+            cols_dev = ["user", "dt", "dispositivo_asignado", "dispositivo_usado"] + ([action_col] if action_col else [])
+            cols_dev = [c for c in cols_dev if c in dev_bad.columns]
+            st.dataframe(dev_bad[cols_dev], use_container_width=True)
+        st.download_button(
+            "⬇️ Descargar inconsistencias de dispositivo (XLSX)",
+            data=make_xlsx(dev_bad[cols_dev], sheet_name="Dispositivo"),
+            file_name="CAAT1_inconsistencias_dispositivo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("Mapea columnas de **dispositivo asignado/usado** para habilitar este reporte.")
+
+    # Ubicación distinta
+    if "mismatch_ubicacion" in work.columns:
+        loc_bad = work[work["mismatch_ubicacion"]].copy()
+        k1, k2 = st.columns(2)
+        with k1:
+            st.metric("Registros con ubicación distinta a la asignada", f"{len(loc_bad):,}")
+        with k2:
+            st.metric("Usuarios únicos con mismatch de ubicación", f"{loc_bad['user'].nunique():,}")
+        with st.expander("Detalle – Ubicación distinta", expanded=False):
+            cols_loc = ["user", "dt", "ubicacion_asignada", "ubicacion_log"] + ([action_col] if action_col else [])
+            cols_loc = [c for c in cols_loc if c in loc_bad.columns]
+            st.dataframe(loc_bad[cols_loc], use_container_width=True)
+        st.download_button(
+            "⬇️ Descargar inconsistencias de ubicación (XLSX)",
+            data=make_xlsx(loc_bad[cols_loc], sheet_name="Ubicacion"),
+            file_name="CAAT1_inconsistencias_ubicacion.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("Mapea columnas de **ubicación asignada/log** para habilitar este reporte.")
 
 # ------------------------------
 # CAAT 2 – Auditoría de privilegios (roles críticos y SoD)
