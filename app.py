@@ -6,15 +6,14 @@
 #   manejo de errores y mensajes guiados.
 # ✔ Claves únicas para widgets → sin StreamlitDuplicateElementId.
 # ✔ Autodetección de columnas y fallback manual.
-# ✔ Reportes XLSX descargables en todos los módulos.  ⟵ (actualizado)
+# ✔ Reportes XLSX descargables en todos los módulos.
 # ✔ KPIs y pequeñas visualizaciones.
 # ✔ CAAT 3 con opción de conciliación bancaria simple.
-# ✔ CAAT 2 con selección de roles críticos y constructor SoD visual. ⟵ (nuevo)
-# ✔ CAAT 1 muestra weekday_name coherente (L–D). ⟵ (nuevo)
+# ✔ CAAT 2 con selección de roles críticos y constructor SoD visual.
+# ✔ CAAT 1 muestra weekday_name coherente (L–D) y atiende dispositivo/ubicación.
 # ------------------------------------------------------------
 
 import io
-import math
 from datetime import datetime, timedelta, time
 from typing import Union, Dict
 
@@ -65,7 +64,6 @@ def make_xlsx(data: Union[pd.DataFrame, Dict[str, pd.DataFrame]], sheet_name: st
 # ------------------------------
 
 def _save_in_session(key: str, file) -> None:
-    """Guarda el archivo subido en sesión (nombre + bytes) para que no 'desaparezca'."""
     if file is None:
         return
     st.session_state[key] = {
@@ -74,7 +72,6 @@ def _save_in_session(key: str, file) -> None:
     }
 
 def _read_from_session(key: str):
-    """Lee DataFrame(s) desde lo guardado en sesión."""
     if key not in st.session_state:
         return None
     info = st.session_state[key]
@@ -88,7 +85,6 @@ def _read_from_session(key: str):
             df = pd.read_csv(data, sep=";", encoding_errors="ignore")
         return df
     elif name.lower().endswith(".xlsx"):
-        # requiere openpyxl
         with pd.ExcelFile(data, engine="openpyxl") as xls:
             sheet_names = xls.sheet_names
             if len(sheet_names) == 1:
@@ -107,7 +103,6 @@ def _read_from_session(key: str):
         return None
 
 def file_uploader_block(title: str, key: str, help_text: str = "", types=("csv", "xlsx")):
-    """Bloque de uploader robusto con caché en sesión y mensajes."""
     with st.container():
         st.markdown(f"**{title}**")
         file = st.file_uploader(
@@ -134,7 +129,6 @@ def file_uploader_block(title: str, key: str, help_text: str = "", types=("csv",
 # ------------------------------
 
 def guess_column(cols, candidates):
-    """Intenta adivinar una columna por lista de 'candidates' (case-insensitive)."""
     clower = [c.lower() for c in cols]
     for cand in candidates:
         if cand.lower() in clower:
@@ -142,7 +136,6 @@ def guess_column(cols, candidates):
     return None
 
 def choose_column(df, label, candidates, key_suffix, help_text=""):
-    """Selectbox con autodetección + fallback manual."""
     cols = list(df.columns)
     if not cols:
         st.warning("El archivo no tiene columnas legibles. Revisa el formato.")
@@ -159,7 +152,6 @@ def choose_column(df, label, candidates, key_suffix, help_text=""):
     return col
 
 def ensure_datetime(series: pd.Series):
-    """Convierte a datetime con coerce; si ya es datetime mantiene."""
     if pd.api.types.is_datetime64_any_dtype(series):
         return series
     return pd.to_datetime(series, errors="coerce")
@@ -176,7 +168,6 @@ def kpi(label: str, value, help_text=""):
             st.caption(help_text)
 
 def robust_zscore(series: pd.Series):
-    """z-score robusto vía MAD."""
     x = series.astype(float).values
     median = np.nanmedian(x)
     mad = np.nanmedian(np.abs(x - median))
@@ -185,7 +176,7 @@ def robust_zscore(series: pd.Series):
     return 0.6745 * (x - median) / mad
 
 # ------------------------------
-# CAAT 1 – Registros fuera de horario
+# CAAT 1 – Registros fuera de horario + inconsistencias
 # ------------------------------
 
 def module_caat1():
@@ -203,7 +194,7 @@ def module_caat1():
     if df is None:
         return
 
-    # --- Selección de columnas básicas ---
+    # Selección de columnas básicas
     c1, c2, c3 = st.columns(3)
     with c1:
         user_col = choose_column(
@@ -227,7 +218,7 @@ def module_caat1():
         if action_col == "(ninguna)":
             action_col = None
 
-    # --- Campos opcionales para inconsistencias (dispositivo / ubicación) ---
+    # Campos opcionales para inconsistencias (dispositivo / ubicación)
     with st.expander("Campos opcionales para inconsistencias (si existen en tu archivo)", expanded=False):
         cD1, cD2 = st.columns(2)
         with cD1:
@@ -260,18 +251,18 @@ def module_caat1():
                 help="Ej.: ubicacion_log / ubicacion",
             )
 
-    # --- Parámetros de horario ---
+    # Parámetros de horario
     c4, c5, c6, c7 = st.columns([1, 1, 1, 2])
     with c4:
         start_h = st.time_input("Inicio de jornada", time(8, 0), key="caat1_start")
     with c5:
-        end_h = st.time_input("Fin de jornada", time(17, 30), key="caat1_end")  # 17:30 como pediste
+        end_h = st.time_input("Fin de jornada", time(17, 30), key="caat1_end")  # 17:30 por defecto
     with c6:
         only_weekdays = st.checkbox("Solo días hábiles (L–V)", value=True, key="caat1_week")
     with c7:
         topn = st.slider("Top N reincidentes", 5, 100, 20, key="caat1_topn")
 
-    # --- Procesamiento base ---
+    # Procesamiento base
     base_cols = [user_col, dt_col] + ([action_col] if action_col else [])
     work = df[base_cols].copy()
     work.rename(columns={user_col: "user", dt_col: "dt"}, inplace=True)
@@ -283,10 +274,10 @@ def module_caat1():
     # Nombre del día y flags L–V
     DIAS = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
     work["weekday_name"] = work["weekday"].map(DIAS)
-    work["is_weekday"] = work["weekday"].between(0, 4)  # L–V
+    work["is_weekday"] = work["weekday"].between(0, 4)
     work["is_weekend"] = ~work["is_weekday"]
 
-    # --- Añadir columnas opcionales (si el usuario las mapeó) ---
+    # Añadir columnas opcionales (si el usuario las mapeó)
     extra_cols = []
     if dev_assigned != "(ninguna)" and dev_used != "(ninguna)":
         work["dispositivo_asignado"] = df[dev_assigned].astype(str)
@@ -294,20 +285,19 @@ def module_caat1():
         work["mismatch_dispositivo"] = work["dispositivo_asignado"].ne(work["dispositivo_usado"])
         extra_cols += ["dispositivo_asignado", "dispositivo_usado", "mismatch_dispositivo"]
 
-    # Aceptar variantes: si el usuario trajo 'ubicacion_de_trabajo', puede mapearla aquí
     if loc_assigned != "(ninguna)" and loc_log != "(ninguna)":
         work["ubicacion_asignada"] = df[loc_assigned].astype(str)
         work["ubicacion_log"] = df[loc_log].astype(str)
         work["mismatch_ubicacion"] = work["ubicacion_asignada"].ne(work["ubicacion_log"])
         extra_cols += ["ubicacion_asignada", "ubicacion_log", "mismatch_ubicacion"]
 
-    # --- Fuera de horario con tu rango 08:00–17:30 ---
+    # Fuera de horario con rango 08:00–17:30
     in_schedule = (work["hour"] >= (start_h.hour + start_h.minute/60)) & (work["hour"] <= (end_h.hour + end_h.minute/60))
     if only_weekdays:
         in_schedule &= work["is_weekday"]
     work["fuera_horario"] = ~in_schedule
 
-    # --- KPIs base ---
+    # KPIs base
     total_events = len(work)
     out_of_hours = int(work["fuera_horario"].sum())
     pct = (out_of_hours / total_events * 100) if total_events else 0
@@ -317,10 +307,9 @@ def module_caat1():
     kcol2.metric("Fuera de horario", f"{out_of_hours:,}")
     kcol3.metric("% fuera de horario", f"{pct:.2f}%")
 
-    # --- Hallazgos: fuera de horario (como tenías) ---
+    # Hallazgos: fuera de horario
     findings = work[work["fuera_horario"]].copy()
     if not findings.empty:
-        # reincidentes
         top = (
             findings.groupby("user", as_index=False)
             .size()
@@ -335,14 +324,12 @@ def module_caat1():
         with st.expander("Hallazgos (detallado)", expanded=False):
             st.dataframe(findings[cols_show], use_container_width=True)
 
-        # DESCARGA XLSX (fuera de horario)
         st.download_button(
             "⬇️ Descargar hallazgos fuera de horario (XLSX)",
             data=make_xlsx(findings[cols_show], sheet_name="Hallazgos"),
             file_name="CAAT1_fuera_horario.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        # Top
         st.download_button(
             "⬇️ Descargar Top (XLSX)",
             data=make_xlsx(top, sheet_name="Top"),
@@ -352,11 +339,10 @@ def module_caat1():
     else:
         st.info("No se detectaron registros fuera de horario con los parámetros actuales.")
 
-    # --- NUEVO: Reportes de inconsistencias de dispositivo/ubicación ---
+    # NUEVO: Reportes de inconsistencias de dispositivo/ubicación
     st.markdown("---")
     st.markdown("### 🔎 Inconsistencias de dispositivo / ubicación")
 
-    # Dispositivo no asignado
     if "mismatch_dispositivo" in work.columns:
         dev_bad = work[work["mismatch_dispositivo"]].copy()
         k1, k2 = st.columns(2)
@@ -377,7 +363,6 @@ def module_caat1():
     else:
         st.info("Mapea columnas de **dispositivo asignado/usado** para habilitar este reporte.")
 
-    # Ubicación distinta
     if "mismatch_ubicacion" in work.columns:
         loc_bad = work[work["mismatch_ubicacion"]].copy()
         k1, k2 = st.columns(2)
@@ -407,7 +392,7 @@ def module_caat2():
     with st.expander("¿Cómo usar este módulo?", expanded=False):
         st.markdown("""
 1. Sube el **maestro de Usuarios/Roles**.  
-2. Elige **Usuario** y **Rol** (autodetección).  
+2. Elige **Usuario** y **Rol**.  
 3. Marca **Roles críticos** desde la lista (multiselect).  
 4. Construye **Reglas SoD** con selectores (ROL_A -> ROL_B).  
 """)
@@ -430,13 +415,11 @@ def module_caat2():
         if crit_col == "(ninguna)":
             crit_col = None
 
-    # Guardas rápidas
     missing = [c for c in [user_col, role_col] if c not in df.columns]
     if missing:
         st.error(f"No encuentro columnas requeridas: {', '.join(missing)}. Corrige la selección o sube otra base.")
         return
 
-    # Normalizamos
     base = df[[user_col, role_col] + ([crit_col] if crit_col else [])].copy()
     base.rename(columns={user_col: "user", role_col: "role"}, inplace=True)
     if crit_col:
@@ -446,7 +429,6 @@ def module_caat2():
     else:
         base["is_critical"] = False
 
-    # ---- Roles críticos: selección múltiple (sin escribir)
     st.markdown("**Roles críticos (selección múltiple)**")
     all_roles = sorted(base["role"].astype(str).unique())
     extra_crit = st.multiselect(
@@ -459,7 +441,6 @@ def module_caat2():
     if extra_crit:
         base["is_critical"] = base["is_critical"] | base["role"].astype(str).isin(extra_crit)
 
-    # ---- Reglas SoD: constructor visual (ROL_A -> ROL_B)
     st.markdown("**Reglas SoD (construye las combinaciones prohibidas)**")
     if "sod_rules" not in st.session_state:
         st.session_state["sod_rules"] = []
@@ -481,14 +462,12 @@ def module_caat2():
         for i, r in enumerate(st.session_state["sod_rules"], start=1):
             st.markdown(f"{i}. {r}")
 
-    # Convertir reglas a lista de tu motor
     rules = []
     for line in st.session_state["sod_rules"]:
         if "->" in line:
             a, b = [x.strip().upper() for x in line.split("->", 1)]
             rules.append((a, b))
 
-    # Conflictos SoD: usuario que tenga ambos roles
     by_user = base.groupby("user")["role"].apply(lambda x: set(map(lambda y: str(y).upper(), x))).reset_index()
     conflicts = []
     for _, r in by_user.iterrows():
@@ -498,7 +477,6 @@ def module_caat2():
                 conflicts.append({"user": r["user"], "regla": f"{a} -> {b}"})
     conflicts_df = pd.DataFrame(conflicts)
 
-    # KPI
     total_users = base["user"].nunique()
     total_roles = base["role"].nunique()
     crit_roles = int(base[base["is_critical"]]["role"].nunique())
@@ -532,7 +510,7 @@ def module_caat2():
             )
 
 # ------------------------------
-# CAAT 3 – Conciliación de logs vs transacciones (+ banca opcional)
+# CAAT 3 – Conciliación de logs vs transacciones (+ bancaria)
 # ------------------------------
 
 def module_caat3():
@@ -556,7 +534,6 @@ def module_caat3():
     if logs is None or txs is None:
         return
 
-    # Selecciones
     st.markdown("### Mapeo de columnas")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -578,12 +555,10 @@ def module_caat3():
     txs2.rename(columns={id_txs: "id", dt_txs: "dt"}, inplace=True)
     txs2["dt"] = ensure_datetime(txs2["dt"])
 
-    # Conciliación por ID
     merged = pd.merge(logs2, txs2, on="id", how="outer", suffixes=("_log", "_tx"))
     missing_log = merged[merged["dt_log"].isna()]
     missing_tx = merged[merged["dt_tx"].isna()]
 
-    # desfase por tolerancia
     both = merged.dropna(subset=["dt_log", "dt_tx"]).copy()
     both["delta_min"] = (both["dt_tx"] - both["dt_log"]).dt.total_seconds().div(60).abs()
     out_tol = both[both["delta_min"] > tol_min]
@@ -650,18 +625,16 @@ def module_caat3():
         c2_ = book[[amt_c, date_c]].copy().rename(columns={amt_c: "amount", date_c: "date"})
         b2["date"] = pd.to_datetime(b2["date"], errors="coerce").dt.date
         c2_["date"] = pd.to_datetime(c2_["date"], errors="coerce").dt.date
-        # Redondeo para evitar centavos ruidosos
         b2["amount_r"] = b2["amount"].astype(float).round(2)
         c2_["amount_r"] = c2_["amount"].astype(float).round(2)
 
-        # Match por monto y cercanía de fecha
         matches = []
         used_idx = set()
         for i, br in b2.dropna(subset=["amount_r", "date"]).iterrows():
             cands = c2_[(c2_["amount_r"] == br["amount_r"]) & ~c2_.index.isin(used_idx)]
             if cands.empty:
                 continue
-            deltas = cands["date"].apply(lambda d: abs((d - br["date"]).days))
+            deltas = cands["date"].apply(lambda d: abs((d - br["date']).days))
             j = deltas.idxmin()
             if deltas.loc[j] <= tol_days:
                 matches.append({"bank_idx": i, "book_idx": j})
@@ -726,7 +699,6 @@ def module_caat4():
     work["amount"] = pd.to_numeric(work["amount"], errors="coerce")
     work = work.dropna(subset=["date", "amount"])
 
-    # z robusto por proveedor
     out_list = []
     for v, g in work.groupby("vendor"):
         z = robust_zscore(g["amount"])
