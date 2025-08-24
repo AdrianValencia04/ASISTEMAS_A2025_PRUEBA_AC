@@ -2,19 +2,19 @@
 # Aprendizaje Colaborativo y Práctico – 2do Parcial
 # Suite CAAT (1–5) + Modo libre
 # ------------------------------------------------------------
-# ✔ Robustez de cargas: CSV/XLSX (requiere openpyxl), cache en sesión,
+# ✔ Robustez de cargas: CSV/XLSX (openpyxl), cache en sesión,
 #   manejo de errores y mensajes guiados.
 # ✔ Claves únicas para widgets → sin StreamlitDuplicateElementId.
 # ✔ Autodetección de columnas y fallback manual.
 # ✔ Reportes XLSX descargables en todos los módulos.
 # ✔ KPIs y pequeñas visualizaciones.
-# ✔ CAAT 3 con opción de conciliación bancaria simple.
-# ✔ CAAT 2 con selección de roles críticos y constructor SoD visual.
-# ✔ CAAT 1 muestra weekday_name coherente (L–D) y atiende dispositivo/ubicación.
+# ✔ CAAT 1: dispositivo/ubicación (asignado vs usado/log) + 08:00–17:30 por defecto.
+# ✔ CAAT 2: roles críticos por multiselect + constructor SoD visual.
+# ✔ CAAT 3: conciliación bancaria corregida (cálculo de deltas vectorizado).
 # ------------------------------------------------------------
 
 import io
-from datetime import datetime, timedelta, time
+from datetime import time
 from typing import Union, Dict
 
 import numpy as np
@@ -88,8 +88,7 @@ def _read_from_session(key: str):
         with pd.ExcelFile(data, engine="openpyxl") as xls:
             sheet_names = xls.sheet_names
             if len(sheet_names) == 1:
-                df = pd.read_excel(xls, sheet_name=sheet_names[0], engine="openpyxl")
-                return df
+                return pd.read_excel(xls, sheet_name=sheet_names[0], engine="openpyxl")
             else:
                 sheet = st.selectbox(
                     "Hoja de Excel",
@@ -97,8 +96,7 @@ def _read_from_session(key: str):
                     key=f"sheet_{key}",
                     help="Selecciona la hoja que contiene tus datos.",
                 )
-                df = pd.read_excel(xls, sheet_name=sheet, engine="openpyxl")
-                return df
+                return pd.read_excel(xls, sheet_name=sheet, engine="openpyxl")
     else:
         return None
 
@@ -118,11 +116,10 @@ def file_uploader_block(title: str, key: str, help_text: str = "", types=("csv",
         if df is None:
             st.info("Sube un archivo para comenzar. Formatos aceptados: CSV o XLSX.")
             return None
-        else:
-            st.success("Archivo listo ✅ (se conserva en memoria para no perderlo tras el rerun).")
-            with st.expander("Vista rápida (primeras filas)", expanded=False):
-                st.dataframe(df.head(50), use_container_width=True)
-            return df
+        st.success("Archivo listo ✅ (se conserva en memoria para no perderlo tras el rerun).")
+        with st.expander("Vista rápida (primeras filas)", expanded=False):
+            st.dataframe(df.head(50), use_container_width=True)
+        return df
 
 # ------------------------------
 # Utilidades de columnas
@@ -137,9 +134,6 @@ def guess_column(cols, candidates):
 
 def choose_column(df, label, candidates, key_suffix, help_text=""):
     cols = list(df.columns)
-    if not cols:
-        st.warning("El archivo no tiene columnas legibles. Revisa el formato.")
-        return None
     guess = guess_column(cols, candidates)
     idx = cols.index(guess) if (guess in cols) else 0
     col = st.selectbox(
@@ -159,13 +153,6 @@ def ensure_datetime(series: pd.Series):
 # ------------------------------
 # Métricas pequeñas
 # ------------------------------
-
-def kpi(label: str, value, help_text=""):
-    col = st.container()
-    with col:
-        st.markdown(f'<div class="kpi"><b>{label}</b><br><span style="font-size:26px">{value}</span></div>', unsafe_allow_html=True)
-        if help_text:
-            st.caption(help_text)
 
 def robust_zscore(series: pd.Series):
     x = series.astype(float).values
@@ -218,7 +205,7 @@ def module_caat1():
         if action_col == "(ninguna)":
             action_col = None
 
-    # Campos opcionales para inconsistencias (dispositivo / ubicación)
+    # Campos opcionales para inconsistencias
     with st.expander("Campos opcionales para inconsistencias (si existen en tu archivo)", expanded=False):
         cD1, cD2 = st.columns(2)
         with cD1:
@@ -275,7 +262,6 @@ def module_caat1():
     DIAS = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
     work["weekday_name"] = work["weekday"].map(DIAS)
     work["is_weekday"] = work["weekday"].between(0, 4)
-    work["is_weekend"] = ~work["is_weekday"]
 
     # Añadir columnas opcionales (si el usuario las mapeó)
     extra_cols = []
@@ -339,7 +325,7 @@ def module_caat1():
     else:
         st.info("No se detectaron registros fuera de horario con los parámetros actuales.")
 
-    # NUEVO: Reportes de inconsistencias de dispositivo/ubicación
+    # Reportes de inconsistencias de dispositivo/ubicación
     st.markdown("---")
     st.markdown("### 🔎 Inconsistencias de dispositivo / ubicación")
 
@@ -631,10 +617,12 @@ def module_caat3():
         matches = []
         used_idx = set()
         for i, br in b2.dropna(subset=["amount_r", "date"]).iterrows():
+            # candidatos por monto
             cands = c2_[(c2_["amount_r"] == br["amount_r"]) & ~c2_.index.isin(used_idx)]
             if cands.empty:
                 continue
-            deltas = cands["date"].apply(lambda d: abs((d - br["date']).days))
+            # diferencia en días (vectorizada y robusta)
+            deltas = (pd.to_datetime(cands["date"]) - pd.to_datetime(br["date"])).abs().dt.days
             j = deltas.idxmin()
             if deltas.loc[j] <= tol_days:
                 matches.append({"bank_idx": i, "book_idx": j})
